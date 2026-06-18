@@ -57,6 +57,7 @@ class TrainConfig:
     dropout: float = 0.1
     head_hidden_dim: int = 384
     position_specific_heads: bool = True
+    slot_pooling: str = "avgmax"
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
@@ -108,6 +109,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--head-hidden-dim", type=int, default=384)
     parser.add_argument("--shared-heads", action="store_true")
+    parser.add_argument("--slot-pooling", choices=["avg", "max", "avgmax"], default="avgmax")
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
@@ -156,6 +158,7 @@ def parse_args() -> TrainConfig:
         dropout=args.dropout,
         head_hidden_dim=args.head_hidden_dim,
         position_specific_heads=not args.shared_heads,
+        slot_pooling=args.slot_pooling,
         use_augmentation=not args.no_augment,
         use_amp=not args.no_amp,
         use_scheduler=not args.no_scheduler,
@@ -1231,6 +1234,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         dropout=model_dropout,
         head_hidden_dim=config.head_hidden_dim,
         position_specific_heads=config.position_specific_heads,
+        slot_pooling=config.slot_pooling,
     ).to(device)
     model.image_size = config.image_size
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
@@ -1269,6 +1273,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         print("Char class weights: off")
     else:
         print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
+    print(f"Slot pooling: {config.slot_pooling}")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
     print(f"TTA scales: {','.join(f'{item:g}' for item in eval_tta_scales)}")
@@ -1403,6 +1408,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                         "head_hidden_dim": config.head_hidden_dim,
                         "num_chars": len(CHARSET),
                         "position_specific_heads": config.position_specific_heads,
+                        "slot_pooling": config.slot_pooling,
                     },
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],

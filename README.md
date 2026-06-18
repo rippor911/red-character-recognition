@@ -62,6 +62,7 @@ max_color_class_weight=3.0
 feature_dim=384
 head_hidden_dim=384
 position_specific_heads=on
+slot_pooling=avgmax
 train_augmentation=on
 cosine_scheduler=on
 warmup_epochs=2
@@ -104,7 +105,8 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 ```text
 输入图片 [B, 3, 64, 256]
 -> 小型 CNN 特征提取
--> AdaptiveAvgPool2d((1, 5))
+-> AdaptiveAvgPool2d((1, 5)) + AdaptiveMaxPool2d((1, 5))
+-> avg/max slot feature 拼接后投影回 384 维
 -> 5 个位置的 384 维 slot feature
 -> 位置专用字符分类头 Linear(..., 36)
 -> 颜色统计分支提取每个 slot 的 RGB 均值、red-minus-other 均值/最大值、正向红色响应和红色覆盖率
@@ -134,7 +136,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。训练 loader 默认按 `color` 模式做均衡采样，可加 `--no-balanced-sampler` 关闭。验证和测试默认使用确定性位移+尺度 TTA，平均 `0,-2,2` 三个位移和 `1,0.95,1.05` 三个尺度的 logits；若需要更快可设 `--tta-scales 1` 或 `--no-tta`。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验、均衡采样和数据增强，便于检查小样本记忆能力。
+正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。训练 loader 默认按 `color` 模式做均衡采样，可加 `--no-balanced-sampler` 关闭。验证和测试默认使用确定性位移+尺度 TTA，平均 `0,-2,2` 三个位移和 `1,0.95,1.05` 三个尺度的 logits；若需要更快可设 `--tta-scales 1` 或 `--no-tta`。slot pooling 默认使用 `avgmax`，同时保留均值和最大响应；可用 `--slot-pooling avg` 切回最初的纯 `AdaptiveAvgPool2d((1, 5))`。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验、均衡采样和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -206,6 +208,8 @@ label 长度为 1 到 5
 ```text
 torch.Size([2, 5, 36])
 torch.Size([2, 5, 2])
+default_params=1,759,662
+avg_pooling_params=1,462,830
 ```
 
 临时小数据 smoke test：
@@ -223,12 +227,13 @@ Train augmentation: on | AMP: on
 Dropout: 0.100 | label_smoothing: 0.030 | scheduler: warmup+cosine warmup_epochs=2
 Color class weights: per-slot shape=(5, 2) min=0.3636 max=1.6364 mean=1.0000 r_by_slot=1.091,0.727,1.455,0.909,1.636
 Char class weights: per-slot shape=(5, 36) min=0.3770 max=1.1429 mean=1.0000
+Slot pooling: avgmax
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
 TTA scales: 1,0.95,1.05
 Balanced sampler: on color_patterns=rruuu:3, ururu:3, ruruu:1, uurru:1, uuurr:1
 Color pattern prior: on candidates=5 weights=0,0.25,0.5,1,1.5,2 confidence_weights=0,0.25,0.5,1 top=rruuu:0.286, ururu:0.286, ruruu:0.143, uurru:0.143, uuurr:0.143
-Model parameters: 1,462,830
+Model parameters: 1,759,662
 Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3416 val_loss=4.0800 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_slot_acc=0.0000 char_sequence_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=0.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
@@ -255,6 +260,7 @@ Train augmentation: off | AMP: on
 Dropout: 0.000 | label_smoothing: 0.000 | scheduler: off
 Color class weights: off
 Char class weights: off
+Slot pooling: avgmax
 EMA: off
 TTA shifts: 0
 TTA scales: 1

@@ -69,11 +69,15 @@ class BaselineCNN(nn.Module):
         num_chars: int = 36,
         dropout: float = 0.1,
         position_specific_heads: bool = True,
+        slot_pooling: str = "avgmax",
     ):
         super().__init__()
+        if slot_pooling not in {"avg", "max", "avgmax"}:
+            raise ValueError(f"slot_pooling must be one of avg, max, avgmax; got {slot_pooling!r}")
         self.num_slots = num_slots
         self.num_chars = num_chars
         self.position_specific_heads = position_specific_heads
+        self.slot_pooling = slot_pooling
         self.backbone = nn.Sequential(
             ConvBlock(3, 48, pool=(2, 2)),
             ConvBlock(48, 64),
@@ -82,7 +86,18 @@ class BaselineCNN(nn.Module):
             DepthwiseSeparableBlock(160, feature_dim, pool=(2, 1), dropout=dropout),
             DepthwiseSeparableBlock(feature_dim, feature_dim, dropout=dropout),
         )
-        self.slot_pool = nn.AdaptiveAvgPool2d((1, num_slots))
+        self.slot_avg_pool = nn.AdaptiveAvgPool2d((1, num_slots))
+        self.slot_max_pool = nn.AdaptiveMaxPool2d((1, num_slots))
+        pooled_feature_dim = feature_dim * 2 if slot_pooling == "avgmax" else feature_dim
+        self.slot_projection = (
+            nn.Sequential(
+                nn.LayerNorm(pooled_feature_dim),
+                nn.Linear(pooled_feature_dim, feature_dim),
+                nn.GELU(),
+            )
+            if pooled_feature_dim != feature_dim
+            else nn.Identity()
+        )
         self.raw_slot_pool = nn.AdaptiveAvgPool2d((1, num_slots))
         self.red_slot_avg_pool = nn.AdaptiveAvgPool2d((1, num_slots))
         self.red_slot_max_pool = nn.AdaptiveMaxPool2d((1, num_slots))
@@ -119,7 +134,16 @@ class BaselineCNN(nn.Module):
 
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.backbone(images)
-        slot_features = self.slot_pool(features).squeeze(2).permute(0, 2, 1).contiguous()
+        avg_slot_features = self.slot_avg_pool(features).squeeze(2).permute(0, 2, 1).contiguous()
+        if self.slot_pooling == "avg":
+            slot_features = avg_slot_features
+        else:
+            max_slot_features = self.slot_max_pool(features).squeeze(2).permute(0, 2, 1).contiguous()
+            if self.slot_pooling == "max":
+                slot_features = max_slot_features
+            else:
+                slot_features = torch.cat([avg_slot_features, max_slot_features], dim=-1)
+        slot_features = self.slot_projection(slot_features)
         slot_features = slot_features + self.position_embedding
 
         raw_slots = self.raw_slot_pool(images).squeeze(2).permute(0, 2, 1).contiguous()
