@@ -60,6 +60,30 @@ class SlotHead(nn.Module):
         return self.net(features)
 
 
+class SlotContextBlock(nn.Module):
+    def __init__(self, feature_dim: int, dropout: float):
+        super().__init__()
+        self.norm = nn.LayerNorm(feature_dim)
+        self.depthwise = nn.Conv1d(
+            feature_dim,
+            feature_dim,
+            kernel_size=3,
+            padding=1,
+            groups=feature_dim,
+            bias=False,
+        )
+        self.pointwise = nn.Conv1d(feature_dim, feature_dim, kernel_size=1, bias=False)
+        self.activation = nn.GELU()
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, slot_features: torch.Tensor) -> torch.Tensor:
+        context = self.norm(slot_features).transpose(1, 2).contiguous()
+        context = self.depthwise(context)
+        context = self.activation(context)
+        context = self.pointwise(context).transpose(1, 2).contiguous()
+        return slot_features + self.dropout(context)
+
+
 class BaselineCNN(nn.Module):
     def __init__(
         self,
@@ -70,6 +94,7 @@ class BaselineCNN(nn.Module):
         dropout: float = 0.1,
         position_specific_heads: bool = True,
         slot_pooling: str = "avgmax",
+        use_slot_context: bool = True,
     ):
         super().__init__()
         if slot_pooling not in {"avg", "max", "avgmax"}:
@@ -78,6 +103,7 @@ class BaselineCNN(nn.Module):
         self.num_chars = num_chars
         self.position_specific_heads = position_specific_heads
         self.slot_pooling = slot_pooling
+        self.use_slot_context = use_slot_context
         self.backbone = nn.Sequential(
             ConvBlock(3, 48, pool=(2, 2)),
             ConvBlock(48, 64),
@@ -121,6 +147,7 @@ class BaselineCNN(nn.Module):
             self.color_head = SlotHead(feature_dim, head_hidden_dim // 2, 2, dropout)
         self.extra_color_stat_proj = nn.Linear(2, feature_dim, bias=False)
         nn.init.zeros_(self.extra_color_stat_proj.weight)
+        self.slot_context = SlotContextBlock(feature_dim, dropout) if use_slot_context else nn.Identity()
 
     def apply_slot_heads(
         self,
@@ -145,6 +172,7 @@ class BaselineCNN(nn.Module):
                 slot_features = torch.cat([avg_slot_features, max_slot_features], dim=-1)
         slot_features = self.slot_projection(slot_features)
         slot_features = slot_features + self.position_embedding
+        slot_features = self.slot_context(slot_features)
 
         raw_slots = self.raw_slot_pool(images).squeeze(2).permute(0, 2, 1).contiguous()
         red_minus_other = images[:, 0:1] - torch.maximum(images[:, 1:2], images[:, 2:3])

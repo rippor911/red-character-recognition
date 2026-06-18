@@ -59,6 +59,7 @@ class TrainConfig:
     head_hidden_dim: int = 384
     position_specific_heads: bool = True
     slot_pooling: str = "avgmax"
+    use_slot_context: bool = True
     normalization: str = "dataset"
     normalization_samples: int = 2048
     use_augmentation: bool = True
@@ -113,6 +114,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--head-hidden-dim", type=int, default=384)
     parser.add_argument("--shared-heads", action="store_true")
     parser.add_argument("--slot-pooling", choices=["avg", "max", "avgmax"], default="avgmax")
+    parser.add_argument("--no-slot-context", action="store_true")
     parser.add_argument("--normalization", choices=["dataset", "fixed", "none"], default="dataset")
     parser.add_argument("--normalization-samples", type=int, default=2048)
     parser.add_argument("--no-augment", action="store_true")
@@ -164,6 +166,7 @@ def parse_args() -> TrainConfig:
         head_hidden_dim=args.head_hidden_dim,
         position_specific_heads=not args.shared_heads,
         slot_pooling=args.slot_pooling,
+        use_slot_context=not args.no_slot_context,
         normalization=args.normalization,
         normalization_samples=args.normalization_samples,
         use_augmentation=not args.no_augment,
@@ -1316,6 +1319,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         head_hidden_dim=config.head_hidden_dim,
         position_specific_heads=config.position_specific_heads,
         slot_pooling=config.slot_pooling,
+        use_slot_context=config.use_slot_context,
     ).to(device)
     model.image_size = config.image_size
     model.input_mean = float(input_mean)
@@ -1361,7 +1365,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         print("Char class weights: off")
     else:
         print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
-    print(f"Slot pooling: {config.slot_pooling}")
+    print(f"Slot pooling: {config.slot_pooling} | slot_context: {'on' if config.use_slot_context else 'off'}")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
     print(f"TTA scales: {','.join(f'{item:g}' for item in eval_tta_scales)}")
@@ -1503,6 +1507,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                         "num_chars": len(CHARSET),
                         "position_specific_heads": config.position_specific_heads,
                         "slot_pooling": config.slot_pooling,
+                        "use_slot_context": config.use_slot_context,
                     },
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
