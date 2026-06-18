@@ -38,7 +38,7 @@ stretch target: final_exact_acc 接近 0.98-0.99
 
 1. 更稳的轻量 CNN：使用 depthwise separable block、slot pooling、slot 位置嵌入和 MLP 分类头。
 2. 颜色专用统计分支：每个 slot 额外提取 RGB 均值以及 `red - max(green, blue)` 的均值/最大值，降低颜色判定对深层字符特征的依赖。
-3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、颜色类别权重、cosine scheduler、AMP、梯度裁剪和 EMA 权重滑动平均。
+3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、颜色类别权重、cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性 TTA。
 4. 验证集阈值校准：保留原始 `final_exact_acc`，同时在验证集上扫描红色概率阈值，记录 `threshold_final_exact_acc`、`color_threshold` 和 `threshold_gain`。最终测试推理使用验证集选出的阈值，不读取或人工修改测试标签。
 
 这类阈值校准常用于把分类概率转成任务目标所需的离散决策。它不会改变模型接口：
@@ -64,3 +64,4 @@ outputs/val_errors.csv
 3. 如果 `char_conf_*` 普遍低但颜色正确，说明主要是字符分类欠拟合，优先增加 epoch 或 `head_hidden_dim`。
 4. 如果训练集小样本能记住但验证集不上升，优先减弱增强、调高 dropout/weight decay 或检查 train/val 分布。
 5. 如果 `training_history.csv` 中 `val_ema_threshold_final_exact_acc` 高于 `val_raw_threshold_final_exact_acc`，说明 EMA 更稳；如果 raw 长期更高，可以临时加 `--no-ema` 做对照实验。
+6. 如果验证/测试图像存在轻微水平偏移，默认 TTA 会平均 `0,-2,2` 三个水平平移视图；如果发现 TTA 变慢或无收益，可加 `--no-tta` 或调整 `--tta-shifts` 做对照。
