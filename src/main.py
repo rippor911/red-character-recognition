@@ -1,9 +1,9 @@
 import argparse
 import random
 from dataclasses import dataclass, field
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 import pandas as pd
@@ -51,6 +51,8 @@ class TrainConfig:
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
+    use_ema: bool = True
+    ema_decay: float = 0.999
     threshold_min: float = 0.05
     threshold_max: float = 0.95
     threshold_steps: int = 19
@@ -86,6 +88,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
+    parser.add_argument("--no-ema", action="store_true")
+    parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--threshold-min", type=float, default=0.05)
     parser.add_argument("--threshold-max", type=float, default=0.95)
     parser.add_argument("--threshold-steps", type=int, default=19)
@@ -118,6 +122,8 @@ def parse_args() -> TrainConfig:
         use_augmentation=not args.no_augment,
         use_amp=not args.no_amp,
         use_scheduler=not args.no_scheduler,
+        use_ema=not args.no_ema,
+        ema_decay=args.ema_decay,
         threshold_min=args.threshold_min,
         threshold_max=args.threshold_max,
         threshold_steps=args.threshold_steps,
@@ -168,6 +174,42 @@ def autocast_context(enabled: bool) -> AbstractContextManager:
         return torch.amp.autocast(device_type="cuda", enabled=enabled)
     except AttributeError:
         return torch.cuda.amp.autocast(enabled=enabled)
+
+
+class ModelEMA:
+    def __init__(self, model: nn.Module, decay: float):
+        if not 0.0 <= decay < 1.0:
+            raise ValueError("ema_decay must be in [0, 1)")
+        self.decay = decay
+        self.shadow = {
+            key: value.detach().clone()
+            for key, value in model.state_dict().items()
+        }
+
+    @torch.no_grad()
+    def update(self, model: nn.Module) -> None:
+        for key, value in model.state_dict().items():
+            value = value.detach()
+            shadow_value = self.shadow[key]
+            if torch.is_floating_point(shadow_value):
+                shadow_value.mul_(self.decay).add_(value, alpha=1.0 - self.decay)
+            else:
+                shadow_value.copy_(value)
+
+    def state_dict(self) -> dict[str, torch.Tensor]:
+        return {key: value.detach().clone() for key, value in self.shadow.items()}
+
+    @contextmanager
+    def apply_to(self, model: nn.Module) -> Iterator[None]:
+        backup = {
+            key: value.detach().clone()
+            for key, value in model.state_dict().items()
+        }
+        model.load_state_dict(self.state_dict(), strict=True)
+        try:
+            yield
+        finally:
+            model.load_state_dict(backup, strict=True)
 
 
 def load_train_data(data_dir: Path = DEFAULT_DATA_DIR) -> pd.DataFrame:
@@ -236,6 +278,7 @@ def train_one_epoch(
     char_loss_weight: float,
     color_loss_weight: float,
     max_grad_norm: float,
+    ema: Optional[ModelEMA] = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -271,6 +314,8 @@ def train_one_epoch(
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
+        if ema is not None:
+            ema.update(model)
 
         batch_size = images.size(0)
         total_samples += batch_size
@@ -395,6 +440,14 @@ def evaluate(
 
 def count_parameters(model: nn.Module) -> int:
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+
+def eval_metric_is_better(candidate: dict[str, float], incumbent: dict[str, float]) -> bool:
+    candidate_score = candidate["threshold_final_exact_acc"]
+    incumbent_score = incumbent["threshold_final_exact_acc"]
+    return candidate_score > incumbent_score or (
+        candidate_score == incumbent_score and candidate["loss"] < incumbent["loss"]
+    )
 
 
 def char_indices_to_string(indices: list[int]) -> str:
@@ -538,6 +591,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     )
     use_amp = config.use_amp and device.type == "cuda"
     scaler = make_grad_scaler(use_amp)
+    ema_enabled = config.use_ema and not config.debug_overfit
+    ema = ModelEMA(model, decay=config.ema_decay) if ema_enabled else None
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     config.output_dir.mkdir(parents=True, exist_ok=True)
     best_path = config.checkpoint_dir / "baseline_best.pt"
@@ -553,6 +608,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         f"Dropout: {model_dropout:.3f} | label_smoothing: {train_label_smoothing:.3f} "
         f"| scheduler: {'on' if scheduler is not None else 'off'}"
     )
+    print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"Model parameters: {count_parameters(model):,}")
 
     for epoch in range(1, config.epochs + 1):
@@ -568,8 +624,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             char_loss_weight=config.char_loss_weight,
             color_loss_weight=config.color_loss_weight,
             max_grad_norm=config.max_grad_norm,
+            ema=ema,
         )
-        eval_metrics = evaluate(
+        raw_eval_metrics = evaluate(
             model,
             val_loader,
             device,
@@ -577,9 +634,26 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             threshold_max=config.threshold_max,
             threshold_steps=config.threshold_steps,
         )
+        eval_metrics = raw_eval_metrics
+        eval_source = "raw"
+        ema_eval_metrics: Optional[dict[str, float]] = None
+        if ema is not None:
+            with ema.apply_to(model):
+                ema_eval_metrics = evaluate(
+                    model,
+                    val_loader,
+                    device,
+                    threshold_min=config.threshold_min,
+                    threshold_max=config.threshold_max,
+                    threshold_steps=config.threshold_steps,
+                )
+            if eval_metric_is_better(ema_eval_metrics, raw_eval_metrics):
+                eval_metrics = ema_eval_metrics
+                eval_source = "ema"
         print(
             f"Epoch {epoch:02d}/{config.epochs} "
             f"lr={current_lr:.2e} "
+            f"selected={eval_source} "
             f"train_loss={train_metrics['loss']:.4f} "
             f"{eval_name}_loss={eval_metrics['loss']:.4f} "
             f"final_exact_acc={eval_metrics['final_exact_acc']:.4f} "
@@ -589,15 +663,26 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
             f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f} "
             f"threshold_gain={eval_metrics['threshold_gain']:.4f}"
+            + (
+                f" raw_threshold_final_exact_acc={raw_eval_metrics['threshold_final_exact_acc']:.4f} "
+                f"ema_threshold_final_exact_acc={ema_eval_metrics['threshold_final_exact_acc']:.4f}"
+                if ema_eval_metrics is not None
+                else ""
+            )
         )
-        history.append(
-            {
-                "epoch": epoch,
-                "lr": current_lr,
-                **{f"train_{key}": value for key, value in train_metrics.items()},
-                **{f"{eval_name}_{key}": value for key, value in eval_metrics.items()},
-            }
-        )
+        history_row: dict[str, float | int | str] = {
+            "epoch": epoch,
+            "lr": current_lr,
+            "selected_model": eval_source,
+            **{f"train_{key}": value for key, value in train_metrics.items()},
+            **{f"{eval_name}_{key}": value for key, value in eval_metrics.items()},
+            f"{eval_name}_raw_threshold_final_exact_acc": raw_eval_metrics["threshold_final_exact_acc"],
+        }
+        if ema_eval_metrics is not None:
+            history_row[f"{eval_name}_ema_threshold_final_exact_acc"] = ema_eval_metrics[
+                "threshold_final_exact_acc"
+            ]
+        history.append(history_row)
         selection_score = eval_metrics["threshold_final_exact_acc"]
         is_better = selection_score > best_score or (
             selection_score == best_score and eval_metrics["loss"] < best_loss
@@ -606,18 +691,21 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             best_score = selection_score
             best_loss = eval_metrics["loss"]
             best_metrics = eval_metrics
+            best_state_dict = ema.state_dict() if eval_source == "ema" and ema is not None else model.state_dict()
             torch.save(
                 {
-                    "model_state_dict": model.state_dict(),
+                    "model_state_dict": best_state_dict,
                     "charset": CHARSET,
                     "image_size": config.image_size,
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
+                    "model_source": eval_source,
+                    "ema_decay": config.ema_decay if ema is not None else None,
                     "epoch": epoch,
                 },
                 best_path,
             )
-            print(f"Saved best checkpoint to {best_path}")
+            print(f"Saved best {eval_source} checkpoint to {best_path}")
         if scheduler is not None:
             scheduler.step()
 
@@ -630,6 +718,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.best_checkpoint_path = best_path
     model.best_metrics = checkpoint.get("metrics", {})
     model.color_threshold = float(checkpoint.get("color_threshold", model.best_metrics.get("color_threshold", 0.5)))
+    model.model_source = str(checkpoint.get("model_source", "raw"))
     if config.save_val_diagnostics:
         save_validation_diagnostics(
             model=model,
