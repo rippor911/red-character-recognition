@@ -383,17 +383,43 @@ def compute_loss(
     char_class_weights: Optional[torch.Tensor] = None,
     color_class_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    char_loss = F.cross_entropy(
-        char_logits.reshape(-1, len(CHARSET)),
-        char_target.reshape(-1),
-        label_smoothing=label_smoothing,
-        weight=char_class_weights,
-    )
-    color_loss = F.cross_entropy(
-        color_logits.reshape(-1, 2),
-        color_target.reshape(-1),
-        weight=color_class_weights,
-    )
+    if char_class_weights is not None and char_class_weights.ndim == 2:
+        char_loss = torch.stack(
+            [
+                F.cross_entropy(
+                    char_logits[:, slot_idx, :],
+                    char_target[:, slot_idx],
+                    label_smoothing=label_smoothing,
+                    weight=char_class_weights[slot_idx],
+                )
+                for slot_idx in range(char_logits.size(1))
+            ]
+        ).mean()
+    else:
+        char_loss = F.cross_entropy(
+            char_logits.reshape(-1, len(CHARSET)),
+            char_target.reshape(-1),
+            label_smoothing=label_smoothing,
+            weight=char_class_weights,
+        )
+
+    if color_class_weights is not None and color_class_weights.ndim == 2:
+        color_loss = torch.stack(
+            [
+                F.cross_entropy(
+                    color_logits[:, slot_idx, :],
+                    color_target[:, slot_idx],
+                    weight=color_class_weights[slot_idx],
+                )
+                for slot_idx in range(color_logits.size(1))
+            ]
+        ).mean()
+    else:
+        color_loss = F.cross_entropy(
+            color_logits.reshape(-1, 2),
+            color_target.reshape(-1),
+            weight=color_class_weights,
+        )
     loss = char_loss * char_loss_weight + color_loss * color_loss_weight
     return loss, char_loss, color_loss
 
@@ -690,18 +716,21 @@ def compute_color_class_weights(
     df: pd.DataFrame,
     device: torch.device,
     max_weight: float,
+    smoothing: float = 1.0,
 ) -> torch.Tensor:
-    counts = torch.zeros(2, dtype=torch.float32)
+    counts = torch.zeros(5, 2, dtype=torch.float32)
     for color in df["color"].astype(str):
         normalized = color.strip().lower()
-        counts[0] += normalized.count("u")
-        counts[1] += normalized.count("r")
-    if torch.any(counts <= 0):
-        return torch.ones(2, dtype=torch.float32, device=device)
-    weights = counts.sum() / (2.0 * counts)
+        for slot_idx, value in enumerate(normalized[:5]):
+            if value == "u":
+                counts[slot_idx, 0] += 1
+            elif value == "r":
+                counts[slot_idx, 1] += 1
+    counts = counts + max(0.0, smoothing)
+    weights = counts.sum(dim=1, keepdim=True) / (2.0 * counts)
     if max_weight > 0:
         weights = torch.clamp(weights, max=max_weight)
-    weights = weights / weights.mean()
+    weights = weights / weights.mean(dim=1, keepdim=True)
     return weights.to(device)
 
 
@@ -709,20 +738,30 @@ def compute_char_class_weights(
     df: pd.DataFrame,
     device: torch.device,
     max_weight: float,
+    smoothing: float = 1.0,
 ) -> torch.Tensor:
     char_to_idx = {char: idx for idx, char in enumerate(CHARSET)}
-    counts = torch.zeros(len(CHARSET), dtype=torch.float32)
+    counts = torch.zeros(5, len(CHARSET), dtype=torch.float32)
     for label in df["all_label"].astype(str):
-        for char in label.strip().upper():
+        for slot_idx, char in enumerate(label.strip().upper()[:5]):
             if char in char_to_idx:
-                counts[char_to_idx[char]] += 1
-    if torch.any(counts <= 0):
-        return torch.ones(len(CHARSET), dtype=torch.float32, device=device)
-    weights = counts.sum() / (len(CHARSET) * counts)
+                counts[slot_idx, char_to_idx[char]] += 1
+    counts = counts + max(0.0, smoothing)
+    weights = counts.sum(dim=1, keepdim=True) / (len(CHARSET) * counts)
     if max_weight > 0:
         weights = torch.clamp(weights, max=max_weight)
-    weights = weights / weights.mean()
+    weights = weights / weights.mean(dim=1, keepdim=True)
     return weights.to(device)
+
+
+def summarize_weight_tensor(weights: torch.Tensor) -> str:
+    values = weights.detach().cpu()
+    return (
+        f"shape={tuple(values.shape)} "
+        f"min={values.min().item():.4f} "
+        f"max={values.max().item():.4f} "
+        f"mean={values.mean().item():.4f}"
+    )
 
 
 def build_color_pattern_prior(df: pd.DataFrame, smoothing: float = 1.0) -> tuple[list[str], list[float]]:
@@ -988,18 +1027,13 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     if color_class_weights is None:
         print("Color class weights: off")
     else:
-        color_weights = color_class_weights.detach().cpu().tolist()
-        print(f"Color class weights: u={color_weights[0]:.4f} r={color_weights[1]:.4f}")
+        color_weights = color_class_weights.detach().cpu()
+        red_weights = ",".join(f"{value:.3f}" for value in color_weights[:, 1].tolist())
+        print(f"Color class weights: per-slot {summarize_weight_tensor(color_class_weights)} r_by_slot={red_weights}")
     if char_class_weights is None:
         print("Char class weights: off")
     else:
-        char_weights = char_class_weights.detach().cpu()
-        print(
-            "Char class weights: "
-            f"min={char_weights.min().item():.4f} "
-            f"max={char_weights.max().item():.4f} "
-            f"mean={char_weights.mean().item():.4f}"
-        )
+        print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
     if pattern_prior_enabled:

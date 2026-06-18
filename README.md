@@ -55,9 +55,9 @@ seed=2026
 device=cuda if available else cpu
 weight_decay=1e-4
 label_smoothing=0.03
-char_class_weight=on
+char_class_weight=on, per-slot
 max_char_class_weight=3.0
-color_class_weight=on
+color_class_weight=on, per-slot
 max_color_class_weight=3.0
 feature_dim=384
 head_hidden_dim=384
@@ -131,7 +131,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里的字符频率自动计算字符类别权重；对颜色分类也按训练子集里的 `u/r` 位置比例自动计算类别权重。验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验和数据增强，便于检查小样本记忆能力。
+正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -210,13 +210,13 @@ Device: cuda
 Train samples: 7 | val samples: 5
 Train augmentation: on | AMP: on
 Dropout: 0.100 | label_smoothing: 0.030 | scheduler: warmup+cosine warmup_epochs=2
-Color class weights: u=0.8000 r=1.2000
-Char class weights: min=1.0000 max=1.0000 mean=1.0000
+Color class weights: per-slot shape=(5, 2) min=0.5000 max=1.5000 mean=1.0000 r_by_slot=1.250,1.000,1.000,1.000,1.500
+Char class weights: per-slot shape=(5, 36) min=0.3600 max=1.0909 mean=1.0000
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
 Color pattern prior: on candidates=6 weights=0,0.25,0.5,1,1.5,2 top=rruuu:0.167, ruruu:0.167, urruu:0.167, ururu:0.167, uurru:0.167, ...
 Model parameters: 1,462,062
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3174 val_loss=3.9955 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=0.9667 color_pattern_acc=0.8333 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.4405 val_loss=3.9738 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
