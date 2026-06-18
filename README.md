@@ -64,6 +64,7 @@ head_hidden_dim=384
 position_specific_heads=on
 train_augmentation=on
 cosine_scheduler=on
+warmup_epochs=2
 amp=cuda only
 ema=on
 ema_decay=0.999
@@ -203,7 +204,7 @@ python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoi
 Device: cuda
 Train samples: 7 | val samples: 5
 Train augmentation: on | AMP: on
-Dropout: 0.100 | label_smoothing: 0.030 | scheduler: on
+Dropout: 0.100 | label_smoothing: 0.030 | scheduler: warmup+cosine warmup_epochs=2
 Color class weights: u=0.8000 r=1.2000
 Char class weights: min=1.0000 max=1.0000 mean=1.0000
 EMA: on decay=0.99900

@@ -57,6 +57,7 @@ class TrainConfig:
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
+    warmup_epochs: int = 2
     use_ema: bool = True
     ema_decay: float = 0.999
     use_tta: bool = True
@@ -102,6 +103,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
+    parser.add_argument("--warmup-epochs", type=int, default=2)
     parser.add_argument("--no-ema", action="store_true")
     parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--no-tta", action="store_true")
@@ -144,6 +146,7 @@ def parse_args() -> TrainConfig:
         use_augmentation=not args.no_augment,
         use_amp=not args.no_amp,
         use_scheduler=not args.no_scheduler,
+        warmup_epochs=args.warmup_epochs,
         use_ema=not args.no_ema,
         ema_decay=args.ema_decay,
         use_tta=not args.no_tta,
@@ -198,6 +201,26 @@ def autocast_context(enabled: bool) -> AbstractContextManager:
         return torch.amp.autocast(device_type="cuda", enabled=enabled)
     except AttributeError:
         return torch.cuda.amp.autocast(enabled=enabled)
+
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    epochs: int,
+    warmup_epochs: int,
+) -> torch.optim.lr_scheduler.LambdaLR:
+    total_epochs = max(1, epochs)
+    warmup_epochs = max(0, min(warmup_epochs, total_epochs))
+
+    def lr_lambda(epoch: int) -> float:
+        if warmup_epochs > 0 and epoch < warmup_epochs:
+            return float(epoch + 1) / float(warmup_epochs)
+        if total_epochs <= warmup_epochs:
+            return 1.0
+        progress = (epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
+        progress = max(0.0, min(1.0, progress))
+        return float(0.5 * (1.0 + np.cos(np.pi * progress)))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
 
 def parse_tta_shifts(value: str) -> tuple[int, ...]:
@@ -732,7 +755,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.image_size = config.image_size
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = (
-        torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.epochs))
+        build_scheduler(optimizer, epochs=config.epochs, warmup_epochs=config.warmup_epochs)
         if train_scheduler_enabled
         else None
     )
@@ -753,7 +776,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     print(f"Train augmentation: {'on' if train_augment else 'off'} | AMP: {'on' if use_amp else 'off'}")
     print(
         f"Dropout: {model_dropout:.3f} | label_smoothing: {train_label_smoothing:.3f} "
-        f"| scheduler: {'on' if scheduler is not None else 'off'}"
+        f"| scheduler: {'warmup+cosine' if scheduler is not None else 'off'}"
+        + (f" warmup_epochs={config.warmup_epochs}" if scheduler is not None else "")
     )
     if color_class_weights is None:
         print("Color class weights: off")
@@ -874,6 +898,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "color_threshold": eval_metrics["color_threshold"],
                     "model_source": eval_source,
                     "ema_decay": config.ema_decay if ema is not None else None,
+                    "scheduler": "warmup+cosine" if scheduler is not None else None,
+                    "warmup_epochs": config.warmup_epochs if scheduler is not None else 0,
                     "tta_shifts": list(eval_tta_shifts),
                     "char_class_weights": (
                         char_class_weights.detach().cpu().tolist()

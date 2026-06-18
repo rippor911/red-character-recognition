@@ -38,7 +38,7 @@ stretch target: final_exact_acc 接近 0.98-0.99
 
 1. 更稳的轻量 CNN：使用 depthwise separable block、slot pooling、slot 位置嵌入和 MLP 分类头；默认 `feature_dim/head_hidden_dim=384`，并为 5 个位置使用位置专用分类头，整体仍保持约 146 万参数的轻量规模。
 2. 颜色专用统计分支：每个 slot 额外提取 RGB 均值以及 `red - max(green, blue)` 的均值/最大值，降低颜色判定对深层字符特征的依赖。
-3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、字符/颜色类别权重、cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性 TTA。
+3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、字符/颜色类别权重、warmup+cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性 TTA。
 4. 验证集阈值校准：保留原始 `final_exact_acc`，同时在验证集上扫描红色概率阈值，记录 `threshold_final_exact_acc`、`color_threshold` 和 `threshold_gain`。最终测试推理使用验证集选出的阈值，不读取或人工修改测试标签。
 
 这类阈值校准常用于把分类概率转成任务目标所需的离散决策。它不会改变模型接口：
