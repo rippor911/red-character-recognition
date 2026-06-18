@@ -45,6 +45,7 @@ class TrainConfig:
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     checkpoint_dir: Path = field(default_factory=lambda: DEFAULT_CHECKPOINT_DIR)
     checkpoint_path: Optional[Path] = None
+    init_checkpoint: Optional[Path] = None
     image_size: tuple[int, int] = (64, 256)
     batch_size: int = 64
     epochs: int = 20
@@ -109,6 +110,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--checkpoint-path", type=Path, default=None)
+    parser.add_argument("--init-checkpoint", type=Path, default=None)
     parser.add_argument("--image-height", type=int, default=64)
     parser.add_argument("--image-width", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -172,6 +174,7 @@ def parse_args() -> TrainConfig:
         output_dir=args.output_dir,
         checkpoint_dir=args.checkpoint_dir,
         checkpoint_path=args.checkpoint_path,
+        init_checkpoint=args.init_checkpoint,
         image_size=(args.image_height, args.image_width),
         batch_size=args.batch_size,
         epochs=args.epochs,
@@ -1683,6 +1686,30 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
     return model
 
 
+def initialize_model_from_checkpoint(
+    model: nn.Module,
+    path: Path,
+    device: torch.device,
+    expected_model_name: str,
+) -> dict[str, object]:
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Initial checkpoint not found: {checkpoint_path}")
+    checkpoint = load_checkpoint(checkpoint_path, device)
+    charset = checkpoint.get("charset", CHARSET)
+    if charset != CHARSET:
+        raise ValueError(f"Checkpoint charset {charset!r} does not match expected charset {CHARSET!r}")
+    model_config = checkpoint.get("model_config", {})
+    if isinstance(model_config, dict):
+        checkpoint_model_name = str(model_config.get("model_name", "baseline_cnn"))
+        if checkpoint_model_name != expected_model_name:
+            raise ValueError(
+                f"Initial checkpoint model {checkpoint_model_name!r} does not match requested model {expected_model_name!r}"
+            )
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    return checkpoint
+
+
 def evaluate_checkpoint_model(
     train_df: pd.DataFrame,
     config: Optional[TrainConfig] = None,
@@ -1913,6 +1940,20 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.input_mean = normalization_for_storage(input_mean)
     model.input_std = normalization_for_storage(input_std)
     model.tta_fill_value = normalization_for_storage(tta_fill_value)
+    init_checkpoint_metadata: dict[str, object] = {}
+    if config.init_checkpoint is not None:
+        init_checkpoint_metadata = initialize_model_from_checkpoint(
+            model=model,
+            path=config.init_checkpoint,
+            device=device,
+            expected_model_name=config.model_name,
+        )
+        init_metrics = init_checkpoint_metadata.get("metrics", {})
+        init_score = init_metrics.get("calibrated_final_exact_acc") if isinstance(init_metrics, dict) else None
+        print(
+            f"Initialized model from {config.init_checkpoint}"
+            + (f" calibrated_final_exact_acc={float(init_score):.4f}" if init_score is not None else "")
+        )
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = (
         build_scheduler(optimizer, epochs=config.epochs, warmup_epochs=config.warmup_epochs)
@@ -2162,6 +2203,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "tta_shifts": list(eval_tta_shifts),
                     "tta_scales": list(eval_tta_scales),
                     "balanced_sampler": balanced_sampler_enabled,
+                    "init_checkpoint": str(config.init_checkpoint) if config.init_checkpoint is not None else None,
+                    "init_checkpoint_epoch": init_checkpoint_metadata.get("epoch") if init_checkpoint_metadata else None,
                     "char_class_weights": (
                         char_class_weights.detach().cpu().tolist()
                         if char_class_weights is not None

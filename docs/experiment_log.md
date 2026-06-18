@@ -246,6 +246,40 @@ absolute_gain=+0.0632
 relative_error_reduction=77.8%
 ```
 
+## 2026-06-19 Fine-Tuning From Checkpoint Support
+
+Motivation:
+
+- High-resolution E4 was still improving at epoch 4.
+- Re-running the whole experiment from scratch is slow.
+- Remaining validation errors are mostly character confusions, so low-LR fine-tuning from the best checkpoint is a reasonable next step.
+
+Implementation:
+
+- Added CLI option `--init-checkpoint`.
+- It initializes training weights from a saved checkpoint before optimizer creation.
+- It is separate from `--checkpoint-path`, which remains for `--predict-only` and `--eval-checkpoint`.
+
+Planned command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_highres_ft_e2 \
+  --checkpoint-dir checkpoints/convnext_highres_ft_e2 \
+  --init-checkpoint checkpoints/convnext_pool_128x384_e4/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 128 \
+  --image-width 384 \
+  --learning-rate 5e-5 \
+  --epochs 2 \
+  --batch-size 24 \
+  --num-workers 2 \
+  --device cuda
+```
+
 Model:
 
 ```text

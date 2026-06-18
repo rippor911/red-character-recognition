@@ -65,6 +65,12 @@ python src/main.py --predict-only --checkpoint-path checkpoints/baseline_best.pt
 
 如果省略 `--checkpoint-path`，`--predict-only` 会默认读取 `--checkpoint-dir` 下的 `baseline_best.pt`。
 
+从已有 checkpoint 初始化继续微调：
+
+```bash
+python src/main.py --model convnext_tiny --normalization imagenet --init-checkpoint checkpoints/convnext_pool_128x384_e4/baseline_best.pt --learning-rate 5e-5 --epochs 2
+```
+
 重新加载 checkpoint 并按固定验证划分输出指标：
 
 ```bash
