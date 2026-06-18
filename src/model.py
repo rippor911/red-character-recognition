@@ -63,8 +63,8 @@ class SlotHead(nn.Module):
 class BaselineCNN(nn.Module):
     def __init__(
         self,
-        feature_dim: int = 256,
-        head_hidden_dim: int = 256,
+        feature_dim: int = 384,
+        head_hidden_dim: int = 384,
         num_slots: int = 5,
         num_chars: int = 36,
         dropout: float = 0.1,

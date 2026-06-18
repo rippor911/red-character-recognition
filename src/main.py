@@ -48,8 +48,9 @@ class TrainConfig:
     use_color_class_weight: bool = True
     max_color_class_weight: float = 3.0
     max_grad_norm: float = 5.0
+    feature_dim: int = 384
     dropout: float = 0.1
-    head_hidden_dim: int = 256
+    head_hidden_dim: int = 384
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
@@ -89,8 +90,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-color-class-weight", action="store_true")
     parser.add_argument("--max-color-class-weight", type=float, default=3.0)
     parser.add_argument("--max-grad-norm", type=float, default=5.0)
+    parser.add_argument("--feature-dim", type=int, default=384)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--head-hidden-dim", type=int, default=256)
+    parser.add_argument("--head-hidden-dim", type=int, default=384)
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
@@ -127,6 +129,7 @@ def parse_args() -> TrainConfig:
         use_color_class_weight=not args.no_color_class_weight,
         max_color_class_weight=args.max_color_class_weight,
         max_grad_norm=args.max_grad_norm,
+        feature_dim=args.feature_dim,
         dropout=args.dropout,
         head_hidden_dim=args.head_hidden_dim,
         use_augmentation=not args.no_augment,
@@ -681,6 +684,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
 
     model = BaselineCNN(
         num_chars=len(CHARSET),
+        feature_dim=config.feature_dim,
         dropout=model_dropout,
         head_hidden_dim=config.head_hidden_dim,
     ).to(device)
@@ -808,6 +812,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "model_state_dict": best_state_dict,
                     "charset": CHARSET,
                     "image_size": config.image_size,
+                    "model_config": {
+                        "feature_dim": config.feature_dim,
+                        "head_hidden_dim": config.head_hidden_dim,
+                        "num_chars": len(CHARSET),
+                    },
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
                     "model_source": eval_source,
