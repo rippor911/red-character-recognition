@@ -105,6 +105,25 @@ def decode_batch_final(
     ]
 
 
+def color_indices_from_scores(red_scores: torch.Tensor, threshold: float) -> torch.Tensor:
+    return (red_scores >= threshold).long()
+
+
+def decode_batch_with_threshold(
+    char_indices: torch.Tensor,
+    red_scores: torch.Tensor,
+    threshold: float,
+    fallback_if_empty: bool = True,
+) -> list[str]:
+    color_indices = color_indices_from_scores(red_scores, threshold)
+    return decode_batch_final(
+        char_indices,
+        color_indices,
+        red_scores=red_scores,
+        fallback_if_empty=fallback_if_empty,
+    )
+
+
 def validate_train_frame(df: pd.DataFrame) -> None:
     required = {"filename", "color", "all_label"}
     missing = required.difference(df.columns)

@@ -17,6 +17,7 @@ from data import (
     RedCharacterTestDataset,
     RedCharacterTrainDataset,
     decode_batch_final,
+    decode_batch_with_threshold,
     split_train_val,
     validate_submission_frame,
     validate_test_frame,
@@ -50,6 +51,9 @@ class TrainConfig:
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
+    threshold_min: float = 0.05
+    threshold_max: float = 0.95
+    threshold_steps: int = 19
     val_ratio: float = 0.1
     seed: int = 2026
     num_workers: int = 0
@@ -80,6 +84,9 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
+    parser.add_argument("--threshold-min", type=float, default=0.05)
+    parser.add_argument("--threshold-max", type=float, default=0.95)
+    parser.add_argument("--threshold-steps", type=int, default=19)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -107,6 +114,9 @@ def parse_args() -> TrainConfig:
         use_augmentation=not args.no_augment,
         use_amp=not args.no_amp,
         use_scheduler=not args.no_scheduler,
+        threshold_min=args.threshold_min,
+        threshold_max=args.threshold_max,
+        threshold_steps=args.threshold_steps,
         val_ratio=args.val_ratio,
         seed=args.seed,
         num_workers=args.num_workers,
@@ -270,7 +280,14 @@ def train_one_epoch(
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict[str, float]:
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    threshold_min: float = 0.05,
+    threshold_max: float = 0.95,
+    threshold_steps: int = 19,
+) -> dict[str, float]:
     model.eval()
     total_loss = 0.0
     total_char_loss = 0.0
@@ -281,6 +298,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
     color_slot_correct = 0
     color_pattern_correct = 0
     total_slots = 0
+    all_pred_chars: list[torch.Tensor] = []
+    all_red_probs: list[torch.Tensor] = []
+    all_target_final: list[str] = []
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -291,7 +311,8 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
 
         pred_chars = char_logits.argmax(dim=-1)
         pred_colors = color_logits.argmax(dim=-1)
-        pred_final = decode_batch_final(pred_chars, pred_colors, color_logits[..., 1], fallback_if_empty=True)
+        red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
+        pred_final = decode_batch_final(pred_chars, pred_colors, red_probs, fallback_if_empty=True)
         target_final = decode_batch_final(char_target, color_target, fallback_if_empty=False)
 
         batch_size = images.size(0)
@@ -304,6 +325,38 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
         char_slot_correct += (pred_chars == char_target).sum().item()
         color_slot_correct += (pred_colors == color_target).sum().item()
         color_pattern_correct += (pred_colors == color_target).all(dim=1).sum().item()
+        all_pred_chars.append(pred_chars.detach().cpu())
+        all_red_probs.append(red_probs.detach().cpu())
+        all_target_final.extend(target_final)
+
+    pred_chars_all = torch.cat(all_pred_chars, dim=0)
+    red_probs_all = torch.cat(all_red_probs, dim=0)
+    best_threshold = 0.5
+    best_threshold_correct = final_correct
+    threshold_steps = max(2, threshold_steps)
+    threshold_min = max(0.0, min(1.0, threshold_min))
+    threshold_max = max(0.0, min(1.0, threshold_max))
+    if threshold_min > threshold_max:
+        threshold_min, threshold_max = threshold_max, threshold_min
+    threshold_candidates = np.linspace(threshold_min, threshold_max, threshold_steps).tolist()
+    threshold_candidates.append(0.5)
+    threshold_candidates = sorted({round(float(item), 6) for item in threshold_candidates})
+    for threshold in threshold_candidates:
+        threshold_final = decode_batch_with_threshold(
+            pred_chars_all,
+            red_probs_all,
+            threshold=threshold,
+            fallback_if_empty=True,
+        )
+        threshold_correct = sum(
+            pred == target for pred, target in zip(threshold_final, all_target_final)
+        )
+        if threshold_correct > best_threshold_correct or (
+            threshold_correct == best_threshold_correct
+            and abs(threshold - 0.5) < abs(best_threshold - 0.5)
+        ):
+            best_threshold_correct = threshold_correct
+            best_threshold = threshold
 
     return {
         "loss": total_loss / total_samples,
@@ -313,6 +366,9 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
         "char_slot_acc": char_slot_correct / total_slots,
         "color_slot_acc": color_slot_correct / total_slots,
         "color_pattern_acc": color_pattern_correct / total_samples,
+        "threshold_final_exact_acc": best_threshold_correct / total_samples,
+        "color_threshold": best_threshold,
+        "threshold_gain": (best_threshold_correct - final_correct) / total_samples,
     }
 
 
@@ -401,16 +457,26 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             color_loss_weight=config.color_loss_weight,
             max_grad_norm=config.max_grad_norm,
         )
-        eval_metrics = evaluate(model, val_loader, device)
+        eval_metrics = evaluate(
+            model,
+            val_loader,
+            device,
+            threshold_min=config.threshold_min,
+            threshold_max=config.threshold_max,
+            threshold_steps=config.threshold_steps,
+        )
         print(
             f"Epoch {epoch:02d}/{config.epochs} "
             f"lr={current_lr:.2e} "
             f"train_loss={train_metrics['loss']:.4f} "
             f"{eval_name}_loss={eval_metrics['loss']:.4f} "
             f"final_exact_acc={eval_metrics['final_exact_acc']:.4f} "
+            f"threshold_final_exact_acc={eval_metrics['threshold_final_exact_acc']:.4f} "
+            f"color_threshold={eval_metrics['color_threshold']:.3f} "
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
-            f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f}"
+            f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f} "
+            f"threshold_gain={eval_metrics['threshold_gain']:.4f}"
         )
         history.append(
             {
@@ -420,11 +486,12 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                 **{f"{eval_name}_{key}": value for key, value in eval_metrics.items()},
             }
         )
-        is_better = eval_metrics["final_exact_acc"] > best_score or (
-            eval_metrics["final_exact_acc"] == best_score and eval_metrics["loss"] < best_loss
+        selection_score = eval_metrics["threshold_final_exact_acc"]
+        is_better = selection_score > best_score or (
+            selection_score == best_score and eval_metrics["loss"] < best_loss
         )
         if is_better:
-            best_score = eval_metrics["final_exact_acc"]
+            best_score = selection_score
             best_loss = eval_metrics["loss"]
             best_metrics = eval_metrics
             torch.save(
@@ -433,6 +500,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "charset": CHARSET,
                     "image_size": config.image_size,
                     "metrics": best_metrics,
+                    "color_threshold": eval_metrics["color_threshold"],
                     "epoch": epoch,
                 },
                 best_path,
@@ -449,6 +517,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.load_state_dict(checkpoint["model_state_dict"])
     model.best_checkpoint_path = best_path
     model.best_metrics = checkpoint.get("metrics", {})
+    model.color_threshold = float(checkpoint.get("color_threshold", model.best_metrics.get("color_threshold", 0.5)))
     return model
 
 
@@ -463,12 +532,21 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     )
     model.eval()
     predictions: list[str] = []
+    color_threshold = float(getattr(model, "color_threshold", 0.5))
+    print(f"Using color threshold {color_threshold:.3f} for test decoding")
     for batch in test_loader:
         images = batch["image"].to(device)
         char_logits, color_logits = model(images)
         pred_chars = char_logits.argmax(dim=-1)
-        pred_colors = color_logits.argmax(dim=-1)
-        predictions.extend(decode_batch_final(pred_chars, pred_colors, color_logits[..., 1], fallback_if_empty=True))
+        red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
+        predictions.extend(
+            decode_batch_with_threshold(
+                pred_chars,
+                red_probs,
+                threshold=color_threshold,
+                fallback_if_empty=True,
+            )
+        )
     return predictions
 
 

@@ -31,3 +31,18 @@ stretch target: final_exact_acc 接近 0.98-0.99
 4. 是否需要按图像实际样式调整增强强度或输入尺寸。
 
 当前仓库没有官方 `dataset/`，因此还不能证明已经达到上述目标。放入官方数据后，以 README 中的默认命令或推荐命令运行并记录验证集结果。
+
+## 当前已实现的提分策略
+
+当前实现仍保持“无预训练、无 Transformer、无 CTC、无集成”的约束，主要增强点是：
+
+1. 更稳的轻量 CNN：使用 depthwise separable block、slot pooling、slot 位置嵌入和 MLP 分类头。
+2. 颜色专用统计分支：每个 slot 额外提取 RGB 均值以及 `red - max(green, blue)` 的均值/最大值，降低颜色判定对深层字符特征的依赖。
+3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、cosine scheduler、AMP 和梯度裁剪。
+4. 验证集阈值校准：保留原始 `final_exact_acc`，同时在验证集上扫描红色概率阈值，记录 `threshold_final_exact_acc`、`color_threshold` 和 `threshold_gain`。最终测试推理使用验证集选出的阈值，不读取或人工修改测试标签。
+
+这类阈值校准常用于把分类概率转成任务目标所需的离散决策。它不会改变模型接口：
+
+```python
+char_logits, color_logits = model(images)
+```

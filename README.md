@@ -124,9 +124,12 @@ loss = char_loss + color_loss
 
 ```text
 final_exact_acc
+threshold_final_exact_acc
+color_threshold
 char_slot_acc
 color_slot_acc
 color_pattern_acc
+threshold_gain
 ```
 
 最终答案解码逻辑：
@@ -136,6 +139,8 @@ color_pattern_acc
 3. 只保留预测为红色的位置；
 4. 从左到右拼接对应字符；
 5. 如果没有任何红色预测，则选择红色 logit 最高的位置，避免空答案。
+
+`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上扫描红色概率阈值，并保存最佳 `color_threshold` 到 checkpoint。测试集推理会使用该阈值解码，若没有校准信息则退回 `0.5`。
 
 ## 提交文件校验
 
@@ -174,9 +179,10 @@ Train samples: 7 | val samples: 5
 Train augmentation: on | AMP: on
 Dropout: 0.100 | label_smoothing: 0.030 | scheduler: on
 Model parameters: 277,590
-Epoch 01/1 lr=1.00e-03 train_loss=4.1585 val_loss=4.0098 final_exact_acc=0.0000 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000
+Epoch 01/1 lr=1.00e-03 train_loss=4.1585 val_loss=4.0098 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
 Saved best checkpoint
 Saved training_history.csv
+Using color threshold 0.500 for test decoding
 Saved submission.csv
 ```
 
@@ -193,7 +199,7 @@ python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoi
 ```text
 Train augmentation: off | AMP: on
 Dropout: 0.000 | label_smoothing: 0.000 | scheduler: off
-Epoch 01/30 lr=1.00e-03 train_loss=4.1320 debug_train_loss=3.8508 final_exact_acc=0.0000 char_slot_acc=0.0750 color_slot_acc=1.0000 color_pattern_acc=1.0000
+Epoch 01/30 lr=1.00e-03 train_loss=4.1320 debug_train_loss=3.8508 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0750 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
 ...
-Epoch 30/30 lr=1.00e-03 train_loss=0.0015 debug_train_loss=0.0038 final_exact_acc=1.0000 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000
+Epoch 30/30 lr=1.00e-03 train_loss=0.0015 debug_train_loss=0.0038 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 color_threshold=0.500 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
 ```
