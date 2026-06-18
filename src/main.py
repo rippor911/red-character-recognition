@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 
 from data import (
     CHARSET,
@@ -70,6 +70,7 @@ class TrainConfig:
     threshold_steps: int = 19
     use_pattern_prior: bool = True
     pattern_prior_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
+    use_balanced_sampler: bool = True
     save_val_diagnostics: bool = True
     max_error_samples: int = 200
     val_ratio: float = 0.1
@@ -118,6 +119,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--threshold-steps", type=int, default=19)
     parser.add_argument("--no-pattern-prior", action="store_true")
     parser.add_argument("--pattern-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
+    parser.add_argument("--no-balanced-sampler", action="store_true")
     parser.add_argument("--no-val-diagnostics", action="store_true")
     parser.add_argument("--max-error-samples", type=int, default=200)
     parser.add_argument("--val-ratio", type=float, default=0.1)
@@ -163,6 +165,7 @@ def parse_args() -> TrainConfig:
         threshold_steps=args.threshold_steps,
         use_pattern_prior=not args.no_pattern_prior,
         pattern_prior_weights=parse_float_sequence(args.pattern_prior_weights),
+        use_balanced_sampler=not args.no_balanced_sampler,
         save_val_diagnostics=not args.no_val_diagnostics,
         max_error_samples=args.max_error_samples,
         val_ratio=args.val_ratio,
@@ -357,16 +360,18 @@ def build_loader(
     seed: int,
     num_workers: int,
     device: torch.device,
+    sampler: Optional[torch.utils.data.Sampler] = None,
 ) -> DataLoader:
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=shuffle,
+        shuffle=shuffle if sampler is None else False,
+        sampler=sampler,
         num_workers=num_workers,
         pin_memory=device.type == "cuda",
-        generator=generator if shuffle else None,
+        generator=generator if shuffle and sampler is None else None,
         worker_init_fn=seed_worker,
         persistent_workers=num_workers > 0,
     )
@@ -822,11 +827,51 @@ def summarize_weight_tensor(weights: torch.Tensor) -> str:
     )
 
 
+def normalize_color_pattern(color: str) -> str:
+    pattern = str(color).strip().lower()
+    if len(pattern) != 5 or any(char not in {"r", "u"} for char in pattern):
+        return "unknown"
+    return pattern
+
+
+def build_color_pattern_sampler(
+    df: pd.DataFrame,
+    seed: int,
+) -> tuple[WeightedRandomSampler, dict[str, int]]:
+    patterns = [normalize_color_pattern(color) for color in df["color"].astype(str)]
+    counts = pd.Series(patterns).value_counts().sort_index().to_dict()
+    sample_weights = torch.tensor(
+        [1.0 / max(1, int(counts[pattern])) for pattern in patterns],
+        dtype=torch.double,
+    )
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True,
+        generator=generator,
+    )
+    return sampler, {str(key): int(value) for key, value in counts.items()}
+
+
+def format_count_summary(counts: dict[str, int], limit: int = 5) -> str:
+    if not counts:
+        return "none"
+    pieces = [
+        f"{pattern}:{count}"
+        for pattern, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+    if len(counts) > limit:
+        pieces.append("...")
+    return ", ".join(pieces)
+
+
 def build_color_pattern_prior(df: pd.DataFrame, smoothing: float = 1.0) -> tuple[list[str], list[float]]:
     counts: dict[str, int] = {}
     for color in df["color"].astype(str):
-        pattern = color.strip().lower()
-        if len(pattern) != 5 or any(char not in {"r", "u"} for char in pattern):
+        pattern = normalize_color_pattern(color)
+        if pattern == "unknown":
             continue
         if "r" not in pattern:
             continue
@@ -1020,6 +1065,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         eval_name = "val"
 
     train_augment = config.use_augmentation and not config.debug_overfit
+    balanced_sampler_enabled = config.use_balanced_sampler and not config.debug_overfit
     pattern_prior_enabled = config.use_pattern_prior and not config.debug_overfit
     pattern_candidates: list[str] = []
     pattern_log_priors: list[float] = []
@@ -1041,8 +1087,18 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         )
     train_dataset = RedCharacterTrainDataset(train_split, train_image_dir, config.image_size, augment=train_augment)
     val_dataset = RedCharacterTrainDataset(val_split, train_image_dir, config.image_size)
+    train_sampler = None
+    sampler_pattern_counts: dict[str, int] = {}
+    if balanced_sampler_enabled:
+        train_sampler, sampler_pattern_counts = build_color_pattern_sampler(train_split, seed=config.seed)
     train_loader = build_loader(
-        train_dataset, config.batch_size, shuffle=True, seed=config.seed, num_workers=config.num_workers, device=device
+        train_dataset,
+        config.batch_size,
+        shuffle=train_sampler is None,
+        seed=config.seed,
+        num_workers=config.num_workers,
+        device=device,
+        sampler=train_sampler,
     )
     val_loader = build_loader(
         val_dataset, config.batch_size, shuffle=False, seed=config.seed, num_workers=config.num_workers, device=device
@@ -1099,6 +1155,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
+    if train_sampler is None:
+        print("Balanced sampler: off")
+    else:
+        print(f"Balanced sampler: on color_patterns={format_count_summary(sampler_pattern_counts)}")
     if pattern_prior_enabled:
         print(
             "Color pattern prior: "
@@ -1230,6 +1290,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "scheduler": "warmup+cosine" if scheduler is not None else None,
                     "warmup_epochs": config.warmup_epochs if scheduler is not None else 0,
                     "tta_shifts": list(eval_tta_shifts),
+                    "balanced_sampler": balanced_sampler_enabled,
                     "char_class_weights": (
                         char_class_weights.detach().cpu().tolist()
                         if char_class_weights is not None
