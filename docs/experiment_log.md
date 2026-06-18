@@ -449,3 +449,34 @@ outputs/convnext_frm_lite_e2/val_predictions.csv
 outputs/convnext_frm_lite_e2/val_errors.csv
 outputs/convnext_frm_lite_e2/submission.csv
 ```
+
+## Current Best
+
+```text
+best_model=ConvNeXt-Tiny pretrained + FRM-lite pool_query
+checkpoint=checkpoints/convnext_frm_lite_e2/baseline_best.pt
+submission=outputs/convnext_frm_lite_e2/submission.csv
+calibrated_final_exact_acc=0.9580
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0392
+relative_error_reduction=48.3%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_frm_lite_e2 \
+  --checkpoint-dir checkpoints/convnext_frm_lite_e2 \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 320 \
+  --learning-rate 3e-4 \
+  --epochs 2 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```
