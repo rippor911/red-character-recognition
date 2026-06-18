@@ -17,7 +17,9 @@ from data import (
     RedCharacterTestDataset,
     RedCharacterTrainDataset,
     color_indices_from_scores,
+    color_indices_from_pattern_prior,
     decode_batch_final,
+    decode_batch_with_pattern_prior,
     decode_batch_with_threshold,
     split_train_val,
     validate_submission_frame,
@@ -66,6 +68,8 @@ class TrainConfig:
     threshold_min: float = 0.05
     threshold_max: float = 0.95
     threshold_steps: int = 19
+    use_pattern_prior: bool = True
+    pattern_prior_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
     save_val_diagnostics: bool = True
     max_error_samples: int = 200
     val_ratio: float = 0.1
@@ -112,6 +116,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--threshold-min", type=float, default=0.05)
     parser.add_argument("--threshold-max", type=float, default=0.95)
     parser.add_argument("--threshold-steps", type=int, default=19)
+    parser.add_argument("--no-pattern-prior", action="store_true")
+    parser.add_argument("--pattern-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
     parser.add_argument("--no-val-diagnostics", action="store_true")
     parser.add_argument("--max-error-samples", type=int, default=200)
     parser.add_argument("--val-ratio", type=float, default=0.1)
@@ -155,6 +161,8 @@ def parse_args() -> TrainConfig:
         threshold_min=args.threshold_min,
         threshold_max=args.threshold_max,
         threshold_steps=args.threshold_steps,
+        use_pattern_prior=not args.no_pattern_prior,
+        pattern_prior_weights=parse_float_sequence(args.pattern_prior_weights),
         save_val_diagnostics=not args.no_val_diagnostics,
         max_error_samples=args.max_error_samples,
         val_ratio=args.val_ratio,
@@ -238,6 +246,20 @@ def parse_tta_shifts(value: str) -> tuple[int, ...]:
         if shift not in deduped:
             deduped.append(shift)
     return tuple(deduped) if deduped else (0,)
+
+
+def parse_float_sequence(value: str) -> tuple[float, ...]:
+    values: list[float] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        values.append(float(item))
+    deduped: list[float] = []
+    for value in values:
+        if value not in deduped:
+            deduped.append(value)
+    return tuple(deduped) if deduped else (0.0,)
 
 
 def translate_images(images: torch.Tensor, shift_x: int, fill_value: float = 1.0) -> torch.Tensor:
@@ -452,7 +474,10 @@ def evaluate(
     threshold_max: float = 0.95,
     threshold_steps: int = 19,
     tta_shifts: Sequence[int] = (0,),
-) -> dict[str, float]:
+    pattern_candidates: Optional[Sequence[str]] = None,
+    pattern_log_priors: Optional[Sequence[float]] = None,
+    pattern_prior_weights: Sequence[float] = (0.0,),
+) -> dict[str, object]:
     model.eval()
     total_loss = 0.0
     total_char_loss = 0.0
@@ -469,6 +494,7 @@ def evaluate(
     total_by_slot = torch.zeros(5, dtype=torch.long)
     all_pred_chars: list[torch.Tensor] = []
     all_red_probs: list[torch.Tensor] = []
+    all_target_colors: list[torch.Tensor] = []
     all_target_final: list[str] = []
 
     for batch in loader:
@@ -501,10 +527,12 @@ def evaluate(
         total_by_slot[:slot_count] += batch_size
         all_pred_chars.append(pred_chars.detach().cpu())
         all_red_probs.append(red_probs.detach().cpu())
+        all_target_colors.append(color_target.detach().cpu())
         all_target_final.extend(target_final)
 
     pred_chars_all = torch.cat(all_pred_chars, dim=0)
     red_probs_all = torch.cat(all_red_probs, dim=0)
+    target_colors_all = torch.cat(all_target_colors, dim=0)
     best_threshold = 0.5
     best_threshold_correct = final_correct
     threshold_steps = max(2, threshold_steps)
@@ -559,6 +587,51 @@ def evaluate(
                 current_threshold = threshold
 
     best_threshold = float(sum(best_thresholds) / len(best_thresholds))
+    best_threshold_colors = color_indices_from_scores(red_probs_all, best_thresholds)
+    best_threshold_color_correct = (best_threshold_colors == target_colors_all).all(dim=1).sum().item()
+    best_pattern_correct = -1
+    best_pattern_color_correct = 0
+    best_pattern_prior_weight = 0.0
+    use_pattern_candidates = bool(pattern_candidates)
+    if use_pattern_candidates:
+        candidate_weights = list(pattern_prior_weights) or [0.0]
+        if 0.0 not in candidate_weights:
+            candidate_weights.insert(0, 0.0)
+        for prior_weight in candidate_weights:
+            pattern_final = decode_batch_with_pattern_prior(
+                pred_chars_all,
+                red_probs_all,
+                patterns=pattern_candidates,
+                pattern_log_priors=pattern_log_priors,
+                prior_weight=float(prior_weight),
+                fallback_if_empty=True,
+            )
+            pattern_correct = sum(
+                pred == target for pred, target in zip(pattern_final, all_target_final)
+            )
+            pattern_colors = color_indices_from_pattern_prior(
+                red_probs_all,
+                patterns=pattern_candidates,
+                pattern_log_priors=pattern_log_priors,
+                prior_weight=float(prior_weight),
+            )
+            pattern_color_correct = (pattern_colors == target_colors_all).all(dim=1).sum().item()
+            if pattern_correct > best_pattern_correct or (
+                pattern_correct == best_pattern_correct
+                and abs(float(prior_weight)) < abs(best_pattern_prior_weight)
+            ):
+                best_pattern_correct = pattern_correct
+                best_pattern_color_correct = int(pattern_color_correct)
+                best_pattern_prior_weight = float(prior_weight)
+    else:
+        best_pattern_correct = best_threshold_correct
+        best_pattern_color_correct = int(best_threshold_color_correct)
+
+    calibrated_correct = best_threshold_correct
+    color_decode_method = "threshold"
+    if use_pattern_candidates and best_pattern_correct > best_threshold_correct:
+        calibrated_correct = best_pattern_correct
+        color_decode_method = "pattern_prior"
 
     metrics = {
         "loss": total_loss / total_samples,
@@ -570,8 +643,15 @@ def evaluate(
         "color_pattern_acc": color_pattern_correct / total_samples,
         "target_length_acc": target_length_correct / total_samples,
         "threshold_final_exact_acc": best_threshold_correct / total_samples,
+        "threshold_color_acc": best_threshold_color_correct / total_samples,
         "color_threshold": best_threshold,
         "color_thresholds": best_thresholds,
+        "pattern_final_exact_acc": best_pattern_correct / total_samples,
+        "pattern_color_acc": best_pattern_color_correct / total_samples,
+        "pattern_prior_weight": best_pattern_prior_weight,
+        "calibrated_final_exact_acc": calibrated_correct / total_samples,
+        "calibrated_gain": (calibrated_correct - final_correct) / total_samples,
+        "color_decode_method": color_decode_method,
         "threshold_gain": (best_threshold_correct - final_correct) / total_samples,
     }
     for slot in range(5):
@@ -585,11 +665,11 @@ def count_parameters(model: nn.Module) -> int:
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
 
-def eval_metric_is_better(candidate: dict[str, float], incumbent: dict[str, float]) -> bool:
-    candidate_score = candidate["threshold_final_exact_acc"]
-    incumbent_score = incumbent["threshold_final_exact_acc"]
+def eval_metric_is_better(candidate: dict[str, object], incumbent: dict[str, object]) -> bool:
+    candidate_score = float(candidate["calibrated_final_exact_acc"])
+    incumbent_score = float(incumbent["calibrated_final_exact_acc"])
     return candidate_score > incumbent_score or (
-        candidate_score == incumbent_score and candidate["loss"] < incumbent["loss"]
+        candidate_score == incumbent_score and float(candidate["loss"]) < float(incumbent["loss"])
     )
 
 
@@ -645,6 +725,45 @@ def compute_char_class_weights(
     return weights.to(device)
 
 
+def build_color_pattern_prior(df: pd.DataFrame, smoothing: float = 1.0) -> tuple[list[str], list[float]]:
+    counts: dict[str, int] = {}
+    for color in df["color"].astype(str):
+        pattern = color.strip().lower()
+        if len(pattern) != 5 or any(char not in {"r", "u"} for char in pattern):
+            continue
+        if "r" not in pattern:
+            continue
+        counts[pattern] = counts.get(pattern, 0) + 1
+
+    if not counts:
+        for mask in range(1, 1 << 5):
+            pattern = "".join("r" if mask & (1 << slot) else "u" for slot in range(5))
+            counts[pattern] = 0
+
+    patterns = sorted(counts, key=lambda pattern: (-counts[pattern], pattern))
+    smoothing = max(0.0, smoothing)
+    total = float(sum(counts.values())) + smoothing * len(patterns)
+    if total <= 0.0:
+        total = float(len(patterns))
+        smoothing = 1.0
+    log_priors = [
+        float(np.log((counts[pattern] + smoothing) / total))
+        for pattern in patterns
+    ]
+    return patterns, log_priors
+
+
+def format_pattern_summary(patterns: Sequence[str], log_priors: Sequence[float], limit: int = 5) -> str:
+    if not patterns:
+        return "none"
+    pieces = []
+    for pattern, log_prior in list(zip(patterns, log_priors))[:limit]:
+        pieces.append(f"{pattern}:{float(np.exp(log_prior)):.3f}")
+    if len(patterns) > limit:
+        pieces.append("...")
+    return ", ".join(pieces)
+
+
 def char_indices_to_string(indices: list[int]) -> str:
     return "".join(CHARSET[int(index)] for index in indices)
 
@@ -663,9 +782,14 @@ def save_validation_diagnostics(
     color_threshold: float | Sequence[float],
     max_error_samples: int,
     tta_shifts: Sequence[int] = (0,),
+    color_decode_method: str = "threshold",
+    color_pattern_candidates: Sequence[str] = (),
+    color_pattern_log_priors: Sequence[float] = (),
+    pattern_prior_weight: float = 0.0,
 ) -> tuple[Path, Path]:
     model.eval()
     rows: list[dict[str, object]] = []
+    use_pattern_prior = color_decode_method == "pattern_prior" and bool(color_pattern_candidates)
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -679,6 +803,15 @@ def save_validation_diagnostics(
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         char_conf = torch.softmax(char_logits, dim=-1).max(dim=-1).values
         threshold_colors = color_indices_from_scores(red_probs, color_threshold)
+        if bool(color_pattern_candidates):
+            pattern_colors = color_indices_from_pattern_prior(
+                red_probs,
+                patterns=color_pattern_candidates,
+                pattern_log_priors=color_pattern_log_priors,
+                prior_weight=pattern_prior_weight,
+            )
+        else:
+            pattern_colors = threshold_colors
 
         pred_final = decode_batch_final(pred_chars, pred_colors, red_probs, fallback_if_empty=True)
         pred_threshold_final = decode_batch_with_threshold(
@@ -687,11 +820,26 @@ def save_validation_diagnostics(
             threshold=color_threshold,
             fallback_if_empty=True,
         )
+        if bool(color_pattern_candidates):
+            pred_pattern_final = decode_batch_with_pattern_prior(
+                pred_chars,
+                red_probs,
+                patterns=color_pattern_candidates,
+                pattern_log_priors=color_pattern_log_priors,
+                prior_weight=pattern_prior_weight,
+                fallback_if_empty=True,
+            )
+        else:
+            pred_pattern_final = pred_threshold_final
+        calibrated_colors = pattern_colors if use_pattern_prior else threshold_colors
+        pred_calibrated_final = pred_pattern_final if use_pattern_prior else pred_threshold_final
         target_final = decode_batch_final(char_target, color_target, fallback_if_empty=False)
 
         pred_chars_rows = pred_chars.detach().cpu().tolist()
         pred_colors_rows = pred_colors.detach().cpu().tolist()
         threshold_colors_rows = threshold_colors.detach().cpu().tolist()
+        pattern_colors_rows = pattern_colors.detach().cpu().tolist()
+        calibrated_colors_rows = calibrated_colors.detach().cpu().tolist()
         red_prob_rows = red_probs.detach().cpu().tolist()
         char_conf_rows = char_conf.detach().cpu().tolist()
         target_chars_rows = char_target.detach().cpu().tolist()
@@ -703,6 +851,8 @@ def save_validation_diagnostics(
             target_color = color_indices_to_pattern(target_colors_rows[row_index])
             pred_color = color_indices_to_pattern(pred_colors_rows[row_index])
             threshold_color = color_indices_to_pattern(threshold_colors_rows[row_index])
+            pattern_color = color_indices_to_pattern(pattern_colors_rows[row_index])
+            calibrated_color = color_indices_to_pattern(calibrated_colors_rows[row_index])
             row: dict[str, object] = {
                 "filename": filename,
                 "target_all_label": target_all_label,
@@ -711,13 +861,21 @@ def save_validation_diagnostics(
                 "pred_all_label": pred_all_label,
                 "pred_color_argmax": pred_color,
                 "pred_color_threshold": threshold_color,
+                "pred_color_pattern_prior": pattern_color,
+                "pred_color_calibrated": calibrated_color,
                 "pred_label_argmax": pred_final[row_index],
                 "pred_label_threshold": pred_threshold_final[row_index],
+                "pred_label_pattern_prior": pred_pattern_final[row_index],
+                "pred_label_calibrated": pred_calibrated_final[row_index],
                 "argmax_correct": pred_final[row_index] == target_final[row_index],
                 "threshold_correct": pred_threshold_final[row_index] == target_final[row_index],
+                "pattern_prior_correct": pred_pattern_final[row_index] == target_final[row_index],
+                "calibrated_correct": pred_calibrated_final[row_index] == target_final[row_index],
                 "char_all_correct": pred_all_label == target_all_label,
                 "color_argmax_correct": pred_color == target_color,
                 "color_threshold_correct": threshold_color == target_color,
+                "color_pattern_prior_correct": pattern_color == target_color,
+                "color_calibrated_correct": calibrated_color == target_color,
             }
             for slot in range(5):
                 row[f"red_prob_{slot + 1}"] = round(float(red_prob_rows[row_index][slot]), 6)
@@ -727,7 +885,7 @@ def save_validation_diagnostics(
     predictions_path = output_dir / f"{split_name}_predictions.csv"
     errors_path = output_dir / f"{split_name}_errors.csv"
     predictions = pd.DataFrame(rows)
-    errors = predictions.loc[~predictions["threshold_correct"]].copy()
+    errors = predictions.loc[~predictions["calibrated_correct"]].copy()
     if max_error_samples >= 0:
         errors = errors.head(max_error_samples)
     predictions.to_csv(predictions_path, index=False)
@@ -760,6 +918,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         eval_name = "val"
 
     train_augment = config.use_augmentation and not config.debug_overfit
+    pattern_prior_enabled = config.use_pattern_prior and not config.debug_overfit
+    pattern_candidates: list[str] = []
+    pattern_log_priors: list[float] = []
+    if pattern_prior_enabled:
+        pattern_candidates, pattern_log_priors = build_color_pattern_prior(train_split)
     char_class_weights = None
     if config.use_char_class_weight and not config.debug_overfit:
         char_class_weights = compute_char_class_weights(
@@ -811,8 +974,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     best_path = config.checkpoint_dir / "baseline_best.pt"
     best_score = -1.0
     best_loss = float("inf")
-    best_metrics: dict[str, float] = {}
-    history: list[dict[str, float | int | str]] = []
+    best_metrics: dict[str, object] = {}
+    history: list[dict[str, object]] = []
 
     print(f"Device: {device}")
     print(f"Train samples: {len(train_dataset)} | {eval_name} samples: {len(val_dataset)}")
@@ -839,6 +1002,15 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         )
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
+    if pattern_prior_enabled:
+        print(
+            "Color pattern prior: "
+            f"on candidates={len(pattern_candidates)} "
+            f"weights={','.join(f'{weight:g}' for weight in config.pattern_prior_weights)} "
+            f"top={format_pattern_summary(pattern_candidates, pattern_log_priors)}"
+        )
+    else:
+        print("Color pattern prior: off")
     print(f"Model parameters: {count_parameters(model):,}")
 
     for epoch in range(1, config.epochs + 1):
@@ -866,6 +1038,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             threshold_max=config.threshold_max,
             threshold_steps=config.threshold_steps,
             tta_shifts=eval_tta_shifts,
+            pattern_candidates=pattern_candidates,
+            pattern_log_priors=pattern_log_priors,
+            pattern_prior_weights=config.pattern_prior_weights,
         )
         eval_metrics = raw_eval_metrics
         eval_source = "raw"
@@ -880,6 +1055,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     threshold_max=config.threshold_max,
                     threshold_steps=config.threshold_steps,
                     tta_shifts=eval_tta_shifts,
+                    pattern_candidates=pattern_candidates,
+                    pattern_log_priors=pattern_log_priors,
+                    pattern_prior_weights=config.pattern_prior_weights,
                 )
             if eval_metric_is_better(ema_eval_metrics, raw_eval_metrics):
                 eval_metrics = ema_eval_metrics
@@ -892,34 +1070,38 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"{eval_name}_loss={eval_metrics['loss']:.4f} "
             f"final_exact_acc={eval_metrics['final_exact_acc']:.4f} "
             f"threshold_final_exact_acc={eval_metrics['threshold_final_exact_acc']:.4f} "
+            f"calibrated_final_exact_acc={eval_metrics['calibrated_final_exact_acc']:.4f} "
+            f"decode={eval_metrics['color_decode_method']} "
             f"color_thresholds={format_thresholds(eval_metrics['color_thresholds'])} "
+            f"pattern_final_exact_acc={eval_metrics['pattern_final_exact_acc']:.4f} "
+            f"pattern_prior_weight={eval_metrics['pattern_prior_weight']:.2f} "
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
             f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f} "
-            f"threshold_gain={eval_metrics['threshold_gain']:.4f}"
+            f"calibrated_gain={eval_metrics['calibrated_gain']:.4f}"
             + (
-                f" raw_threshold_final_exact_acc={raw_eval_metrics['threshold_final_exact_acc']:.4f} "
-                f"ema_threshold_final_exact_acc={ema_eval_metrics['threshold_final_exact_acc']:.4f}"
+                f" raw_calibrated_final_exact_acc={raw_eval_metrics['calibrated_final_exact_acc']:.4f} "
+                f"ema_calibrated_final_exact_acc={ema_eval_metrics['calibrated_final_exact_acc']:.4f}"
                 if ema_eval_metrics is not None
                 else ""
             )
         )
-        history_row: dict[str, float | int | str] = {
+        history_row: dict[str, object] = {
             "epoch": epoch,
             "lr": current_lr,
             "selected_model": eval_source,
             **{f"train_{key}": value for key, value in train_metrics.items()},
             **{f"{eval_name}_{key}": value for key, value in eval_metrics.items()},
-            f"{eval_name}_raw_threshold_final_exact_acc": raw_eval_metrics["threshold_final_exact_acc"],
+            f"{eval_name}_raw_calibrated_final_exact_acc": raw_eval_metrics["calibrated_final_exact_acc"],
         }
         if ema_eval_metrics is not None:
-            history_row[f"{eval_name}_ema_threshold_final_exact_acc"] = ema_eval_metrics[
-                "threshold_final_exact_acc"
+            history_row[f"{eval_name}_ema_calibrated_final_exact_acc"] = ema_eval_metrics[
+                "calibrated_final_exact_acc"
             ]
         history.append(history_row)
-        selection_score = eval_metrics["threshold_final_exact_acc"]
+        selection_score = float(eval_metrics["calibrated_final_exact_acc"])
         is_better = selection_score > best_score or (
-            selection_score == best_score and eval_metrics["loss"] < best_loss
+            selection_score == best_score and float(eval_metrics["loss"]) < best_loss
         )
         if is_better:
             best_score = selection_score
@@ -940,6 +1122,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
                     "color_thresholds": eval_metrics["color_thresholds"],
+                    "color_decode_method": eval_metrics["color_decode_method"],
+                    "color_pattern_candidates": pattern_candidates,
+                    "color_pattern_log_priors": pattern_log_priors,
+                    "pattern_prior_weight": eval_metrics["pattern_prior_weight"],
                     "model_source": eval_source,
                     "ema_decay": config.ema_decay if ema is not None else None,
                     "scheduler": "warmup+cosine" if scheduler is not None else None,
@@ -978,6 +1164,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             model.best_metrics.get("color_thresholds", threshold_to_list(model.color_threshold)),
         )
     )
+    model.color_decode_method = str(checkpoint.get("color_decode_method", model.best_metrics.get("color_decode_method", "threshold")))
+    model.color_pattern_candidates = tuple(checkpoint.get("color_pattern_candidates", ()))
+    model.color_pattern_log_priors = tuple(float(item) for item in checkpoint.get("color_pattern_log_priors", ()))
+    model.pattern_prior_weight = float(checkpoint.get("pattern_prior_weight", model.best_metrics.get("pattern_prior_weight", 0.0)))
     model.model_source = str(checkpoint.get("model_source", "raw"))
     model.tta_shifts = tuple(checkpoint.get("tta_shifts", eval_tta_shifts))
     if config.save_val_diagnostics:
@@ -990,6 +1180,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             color_threshold=model.color_thresholds,
             max_error_samples=config.max_error_samples,
             tta_shifts=model.tta_shifts,
+            color_decode_method=model.color_decode_method,
+            color_pattern_candidates=model.color_pattern_candidates,
+            color_pattern_log_priors=model.color_pattern_log_priors,
+            pattern_prior_weight=model.pattern_prior_weight,
         )
     return model
 
@@ -1012,22 +1206,45 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
             threshold_to_list(float(getattr(model, "color_threshold", 0.5))),
         )
     )
+    color_decode_method = str(getattr(model, "color_decode_method", "threshold"))
+    color_pattern_candidates = tuple(getattr(model, "color_pattern_candidates", ()))
+    color_pattern_log_priors = tuple(getattr(model, "color_pattern_log_priors", ()))
+    pattern_prior_weight = float(getattr(model, "pattern_prior_weight", 0.0))
     tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts if config.use_tta else (0,)))
-    print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
+    use_pattern_prior = color_decode_method == "pattern_prior" and bool(color_pattern_candidates)
+    if use_pattern_prior:
+        print(
+            "Using color pattern prior for test decoding "
+            f"(candidates={len(color_pattern_candidates)}, prior_weight={pattern_prior_weight:.2f})"
+        )
+    else:
+        print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
     print(f"Using TTA shifts {','.join(str(item) for item in tta_shifts)} for test decoding")
     for batch in test_loader:
         images = batch["image"].to(device)
         char_logits, color_logits = forward_with_tta(model, images, tta_shifts)
         pred_chars = char_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
-        predictions.extend(
-            decode_batch_with_threshold(
-                pred_chars,
-                red_probs,
-                threshold=color_threshold,
-                fallback_if_empty=True,
+        if use_pattern_prior:
+            predictions.extend(
+                decode_batch_with_pattern_prior(
+                    pred_chars,
+                    red_probs,
+                    patterns=color_pattern_candidates,
+                    pattern_log_priors=color_pattern_log_priors,
+                    prior_weight=pattern_prior_weight,
+                    fallback_if_empty=True,
+                )
             )
-        )
+        else:
+            predictions.extend(
+                decode_batch_with_threshold(
+                    pred_chars,
+                    red_probs,
+                    threshold=color_threshold,
+                    fallback_if_empty=True,
+                )
+            )
     return predictions
 
 

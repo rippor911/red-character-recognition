@@ -131,7 +131,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里的字符频率自动计算字符类别权重；对颜色分类也按训练子集里的 `u/r` 位置比例自动计算类别权重。验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `threshold_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA 和数据增强，便于检查小样本记忆能力。
+正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里的字符频率自动计算字符类别权重；对颜色分类也按训练子集里的 `u/r` 位置比例自动计算类别权重。验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -140,11 +140,16 @@ loss = char_loss + color_loss
 ```text
 final_exact_acc
 threshold_final_exact_acc
+threshold_color_acc
+pattern_final_exact_acc
+calibrated_final_exact_acc
+color_decode_method
 color_thresholds
+pattern_prior_weight
 char_slot_acc
 color_slot_acc
 color_pattern_acc
-threshold_gain
+calibrated_gain
 target_length_acc
 char_slot_1_acc ... char_slot_5_acc
 color_slot_1_acc ... color_slot_5_acc
@@ -158,7 +163,7 @@ color_slot_1_acc ... color_slot_5_acc
 4. 从左到右拼接对应字符；
 5. 如果没有任何红色预测，则选择红色 logit 最高的位置，避免空答案。
 
-`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，并保存最佳 `color_thresholds` 到 checkpoint。测试集推理会使用这些阈值解码，若没有校准信息则退回每个位置 `0.5`。
+`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，并保存最佳 `color_thresholds` 到 checkpoint。训练还会从训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，得到 `pattern_final_exact_acc`。最终 checkpoint 和测试推理使用 `calibrated_final_exact_acc` 对应的更优解码方式；如果模式先验没有带来收益，则退回每个位置阈值解码。
 
 训练结束后默认保存验证集诊断文件：
 
@@ -167,7 +172,7 @@ outputs/val_predictions.csv
 outputs/val_errors.csv
 ```
 
-其中包含每张验证图的目标标签、预测标签、argmax/阈值颜色模式、红色概率和字符置信度。若只想训练不导出诊断，可加 `--no-val-diagnostics`；错误样本数量可用 `--max-error-samples` 控制。
+其中包含每张验证图的目标标签、预测标签、argmax/阈值/模式先验/最终校准颜色模式、红色概率和字符置信度。若只想训练不导出诊断，可加 `--no-val-diagnostics`；错误样本数量可用 `--max-error-samples` 控制。
 
 ## 提交文件校验
 
@@ -209,8 +214,9 @@ Color class weights: u=0.8000 r=1.2000
 Char class weights: min=1.0000 max=1.0000 mean=1.0000
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
+Color pattern prior: on candidates=6 weights=0,0.25,0.5,1,1.5,2 top=rruuu:0.167, ruruu:0.167, urruu:0.167, ururu:0.167, uurru:0.167, ...
 Model parameters: 1,462,062
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.2598 val_loss=3.9604 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_thresholds=0.500,0.500,0.500,0.500,0.500 char_slot_acc=0.0400 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3174 val_loss=3.9955 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=0.9667 color_pattern_acc=0.8333 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
@@ -237,9 +243,10 @@ Color class weights: off
 Char class weights: off
 EMA: off
 TTA shifts: 0
-Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1910 debug_train_loss=3.6281 final_exact_acc=0.1250 threshold_final_exact_acc=0.1250 color_thresholds=0.500,0.500,0.500,0.500,0.500 char_slot_acc=0.1500 color_slot_acc=0.9000 color_pattern_acc=0.5000 threshold_gain=0.0000
+Color pattern prior: off
+Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1606 debug_train_loss=3.7730 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.1000 color_slot_acc=0.9000 color_pattern_acc=0.5000 calibrated_gain=0.0000
 ...
-Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.0019 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 color_thresholds=0.500,0.500,0.500,0.500,0.500 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
+Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.1443 final_exact_acc=0.8750 threshold_final_exact_acc=0.8750 calibrated_final_exact_acc=0.8750 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.8750 pattern_prior_weight=0.00 char_slot_acc=0.9500 color_slot_acc=1.0000 color_pattern_acc=1.0000 calibrated_gain=0.0000
 Saved debug_train_predictions.csv
 Saved debug_train_errors.csv
 ```

@@ -114,6 +114,47 @@ def color_indices_from_scores(red_scores: torch.Tensor, threshold: float | Seque
     return (red_scores >= float(threshold)).long()
 
 
+def color_indices_from_pattern_prior(
+    red_scores: torch.Tensor,
+    patterns: Sequence[str],
+    pattern_log_priors: Optional[Sequence[float]] = None,
+    prior_weight: float = 0.0,
+) -> torch.Tensor:
+    if not patterns:
+        raise ValueError("patterns must not be empty")
+
+    pattern_rows: list[list[int]] = []
+    for pattern in patterns:
+        normalized = str(pattern).strip().lower()
+        if len(normalized) != NUM_SLOTS:
+            raise ValueError(f"pattern must have length {NUM_SLOTS}, got {pattern!r}")
+        try:
+            pattern_rows.append([COLOR_TO_IDX[char] for char in normalized])
+        except KeyError as exc:
+            raise ValueError(f"unknown color {exc.args[0]!r} in pattern {pattern!r}") from exc
+
+    pattern_tensor = torch.tensor(pattern_rows, dtype=red_scores.dtype, device=red_scores.device)
+    red_scores = red_scores.clamp(1e-6, 1.0 - 1e-6)
+    red_log_prob = red_scores.log().unsqueeze(1)
+    non_red_log_prob = (1.0 - red_scores).log().unsqueeze(1)
+    log_likelihood = torch.where(
+        pattern_tensor.unsqueeze(0).bool(),
+        red_log_prob,
+        non_red_log_prob,
+    ).sum(dim=-1)
+
+    if pattern_log_priors is not None and float(prior_weight) != 0.0:
+        if len(pattern_log_priors) != len(patterns):
+            raise ValueError(
+                f"pattern_log_priors must have {len(patterns)} values, got {len(pattern_log_priors)}"
+            )
+        prior_tensor = torch.tensor(pattern_log_priors, dtype=red_scores.dtype, device=red_scores.device)
+        log_likelihood = log_likelihood + float(prior_weight) * prior_tensor.view(1, -1)
+
+    best_pattern_indices = log_likelihood.argmax(dim=1)
+    return pattern_tensor[best_pattern_indices].long()
+
+
 def decode_batch_with_threshold(
     char_indices: torch.Tensor,
     red_scores: torch.Tensor,
@@ -121,6 +162,28 @@ def decode_batch_with_threshold(
     fallback_if_empty: bool = True,
 ) -> list[str]:
     color_indices = color_indices_from_scores(red_scores, threshold)
+    return decode_batch_final(
+        char_indices,
+        color_indices,
+        red_scores=red_scores,
+        fallback_if_empty=fallback_if_empty,
+    )
+
+
+def decode_batch_with_pattern_prior(
+    char_indices: torch.Tensor,
+    red_scores: torch.Tensor,
+    patterns: Sequence[str],
+    pattern_log_priors: Optional[Sequence[float]] = None,
+    prior_weight: float = 0.0,
+    fallback_if_empty: bool = True,
+) -> list[str]:
+    color_indices = color_indices_from_pattern_prior(
+        red_scores,
+        patterns=patterns,
+        pattern_log_priors=pattern_log_priors,
+        prior_weight=prior_weight,
+    )
     return decode_batch_final(
         char_indices,
         color_indices,
