@@ -145,3 +145,67 @@ Use plan:
 - Use the pretrained ConvNeXt-Tiny only as a visual feature extractor/fine-tuned backbone.
 - Keep the task-specific five-slot character head and five-slot red-color head.
 - Do not use external task labels or test-set annotations.
+
+## 2026-06-19 ConvNeXt-Tiny Integration
+
+Implementation changes:
+
+- Added `PretrainedConvNeXtSlotModel` in `src/model.py`.
+- Added CLI option `--model baseline_cnn|convnext_tiny`.
+- Added CLI option `--no-pretrained-backbone`.
+- Added `--normalization imagenet` for pretrained ImageNet backbones.
+- Kept the same five-slot output contract:
+
+```text
+char_logits=[B,5,36]
+color_logits=[B,5,2]
+```
+
+Smoke command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_smoke \
+  --checkpoint-dir checkpoints/convnext_smoke \
+  --model convnext_tiny \
+  --normalization imagenet \
+  --feature-dim 64 \
+  --head-hidden-dim 64 \
+  --debug-overfit \
+  --debug-samples 16 \
+  --epochs 1 \
+  --batch-size 4 \
+  --device cuda \
+  --skip-test \
+  --no-tta
+```
+
+Smoke result:
+
+```text
+Model: convnext_tiny pretrained_backbone=on
+params=27,969,918
+train_loss=4.2474
+debug_train_loss=4.1370
+calibrated_final_exact_acc=0.0625
+char_slot_acc=0.1000
+color_slot_acc=0.6375
+```
+
+Next experiment:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_tiny_e5 \
+  --checkpoint-dir checkpoints/convnext_tiny_e5 \
+  --model convnext_tiny \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 320 \
+  --learning-rate 3e-4 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```

@@ -29,7 +29,7 @@ from data import (
     validate_test_frame,
     validate_train_frame,
 )
-from model import BaselineCNN
+from model import BaselineCNN, PretrainedConvNeXtSlotModel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +58,8 @@ class TrainConfig:
     use_color_class_weight: bool = True
     max_color_class_weight: float = 3.0
     max_grad_norm: float = 5.0
+    model_name: str = "baseline_cnn"
+    pretrained_backbone: bool = True
     feature_dim: int = 384
     dropout: float = 0.1
     head_hidden_dim: int = 384
@@ -120,13 +122,15 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-color-class-weight", action="store_true")
     parser.add_argument("--max-color-class-weight", type=float, default=3.0)
     parser.add_argument("--max-grad-norm", type=float, default=5.0)
+    parser.add_argument("--model", choices=["baseline_cnn", "convnext_tiny"], default="baseline_cnn")
+    parser.add_argument("--no-pretrained-backbone", action="store_true")
     parser.add_argument("--feature-dim", type=int, default=384)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--head-hidden-dim", type=int, default=384)
     parser.add_argument("--shared-heads", action="store_true")
     parser.add_argument("--slot-pooling", choices=["avg", "max", "avgmax"], default="avgmax")
     parser.add_argument("--no-slot-context", action="store_true")
-    parser.add_argument("--normalization", choices=["dataset", "fixed", "none"], default="dataset")
+    parser.add_argument("--normalization", choices=["dataset", "imagenet", "fixed", "none"], default="dataset")
     parser.add_argument("--normalization-samples", type=int, default=2048)
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
@@ -179,6 +183,8 @@ def parse_args() -> TrainConfig:
         use_color_class_weight=not args.no_color_class_weight,
         max_color_class_weight=args.max_color_class_weight,
         max_grad_norm=args.max_grad_norm,
+        model_name=args.model,
+        pretrained_backbone=not args.no_pretrained_backbone,
         feature_dim=args.feature_dim,
         dropout=args.dropout,
         head_hidden_dim=args.head_hidden_dim,
@@ -228,6 +234,41 @@ def resolve_device(device_name: str) -> torch.device:
     if device_name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_name)
+
+
+def build_model(
+    model_name: str,
+    num_chars: int,
+    feature_dim: int,
+    dropout: float,
+    head_hidden_dim: int,
+    position_specific_heads: bool,
+    slot_pooling: str,
+    use_slot_context: bool,
+    pretrained_backbone: bool = True,
+) -> nn.Module:
+    if model_name == "baseline_cnn":
+        return BaselineCNN(
+            num_chars=num_chars,
+            feature_dim=feature_dim,
+            dropout=dropout,
+            head_hidden_dim=head_hidden_dim,
+            position_specific_heads=position_specific_heads,
+            slot_pooling=slot_pooling,
+            use_slot_context=use_slot_context,
+        )
+    if model_name == "convnext_tiny":
+        return PretrainedConvNeXtSlotModel(
+            num_chars=num_chars,
+            feature_dim=feature_dim,
+            dropout=dropout,
+            head_hidden_dim=head_hidden_dim,
+            position_specific_heads=position_specific_heads,
+            slot_pooling=slot_pooling,
+            use_slot_context=use_slot_context,
+            pretrained=pretrained_backbone,
+        )
+    raise ValueError(f"unknown model_name: {model_name}")
 
 
 def set_seed(seed: int) -> None:
@@ -1133,6 +1174,8 @@ def resolve_input_normalization(
         mean, std = [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
     elif config.normalization == "fixed":
         mean, std = [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
+    elif config.normalization == "imagenet":
+        mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
     else:
         mean, std = compute_dataset_normalization(
             train_split,
@@ -1541,7 +1584,7 @@ def checkpoint_image_size(checkpoint: dict[str, object], fallback: tuple[int, in
 
 
 def restore_checkpoint_metadata(
-    model: BaselineCNN,
+    model: nn.Module,
     checkpoint: dict[str, object],
     checkpoint_path: Path,
     config: TrainConfig,
@@ -1550,7 +1593,7 @@ def restore_checkpoint_metadata(
     fallback_tta_fill_value: NormalizationValue = 1.0,
     fallback_tta_shifts: Sequence[int] = (0,),
     fallback_tta_scales: Sequence[float] = (1.0,),
-) -> BaselineCNN:
+) -> nn.Module:
     metrics = checkpoint.get("metrics", {})
     if not isinstance(metrics, dict):
         metrics = {}
@@ -1586,7 +1629,7 @@ def restore_checkpoint_metadata(
     return model
 
 
-def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None) -> BaselineCNN:
+def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None) -> nn.Module:
     config = config or TrainConfig()
     device = resolve_device(config.device)
     checkpoint_path = Path(path)
@@ -1602,7 +1645,8 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
     if not isinstance(model_config, dict):
         raise ValueError("Checkpoint field 'model_config' must be a dictionary")
 
-    model = BaselineCNN(
+    model = build_model(
+        model_name=str(model_config.get("model_name", "baseline_cnn")),
         num_chars=int(model_config.get("num_chars", len(CHARSET))),
         feature_dim=int(model_config.get("feature_dim", config.feature_dim)),
         dropout=float(model_config.get("dropout", config.dropout)),
@@ -1610,6 +1654,7 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
         position_specific_heads=bool(model_config.get("position_specific_heads", config.position_specific_heads)),
         slot_pooling=str(model_config.get("slot_pooling", "avg")),
         use_slot_context=bool(model_config.get("use_slot_context", False)),
+        pretrained_backbone=False,
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     restore_checkpoint_metadata(
@@ -1635,7 +1680,7 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
 def evaluate_checkpoint_model(
     train_df: pd.DataFrame,
     config: Optional[TrainConfig] = None,
-) -> tuple[BaselineCNN, dict[str, object]]:
+) -> tuple[nn.Module, dict[str, object]]:
     config = config or TrainConfig()
     set_seed(config.seed)
     device = resolve_device(config.device)
@@ -1763,7 +1808,7 @@ def evaluate_checkpoint_model(
     return model, metrics
 
 
-def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> BaselineCNN:
+def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> nn.Module:
     config = config or TrainConfig()
     set_seed(config.seed)
     device = resolve_device(config.device)
@@ -1846,7 +1891,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     eval_tta_shifts = config.tta_shifts if config.use_tta and not config.debug_overfit else (0,)
     eval_tta_scales = config.tta_scales if config.use_tta and not config.debug_overfit else (1.0,)
 
-    model = BaselineCNN(
+    model = build_model(
+        model_name=config.model_name,
         num_chars=len(CHARSET),
         feature_dim=config.feature_dim,
         dropout=model_dropout,
@@ -1854,6 +1900,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         position_specific_heads=config.position_specific_heads,
         slot_pooling=config.slot_pooling,
         use_slot_context=config.use_slot_context,
+        pretrained_backbone=config.pretrained_backbone,
     ).to(device)
     model.image_size = config.image_size
     model.input_mean = normalization_for_storage(input_mean)
@@ -1879,6 +1926,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
 
     print(f"Device: {device}")
     print(f"Train samples: {len(train_dataset)} | {eval_name} samples: {len(val_dataset)}")
+    print(
+        f"Model: {config.model_name} "
+        f"pretrained_backbone={'on' if config.model_name != 'baseline_cnn' and config.pretrained_backbone else 'off'}"
+    )
     print(
         f"Input normalization: {config.normalization} "
         f"mean={format_normalization_value(input_mean)} "
@@ -2065,12 +2116,15 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "charset": CHARSET,
                     "image_size": config.image_size,
                     "model_config": {
+                        "model_name": config.model_name,
                         "feature_dim": config.feature_dim,
                         "head_hidden_dim": config.head_hidden_dim,
                         "num_chars": len(CHARSET),
                         "position_specific_heads": config.position_specific_heads,
                         "slot_pooling": config.slot_pooling,
                         "use_slot_context": config.use_slot_context,
+                        "pretrained_backbone": config.pretrained_backbone,
+                        "dropout": model_dropout,
                     },
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
@@ -2158,7 +2212,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
 
 
 @torch.no_grad()
-def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> list[str]:
+def predict_test(model: nn.Module, test_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> list[str]:
     config = config or TrainConfig()
     device = next(model.parameters()).device
     image_size = getattr(model, "image_size", config.image_size)
