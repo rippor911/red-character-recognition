@@ -119,6 +119,8 @@ def color_indices_from_pattern_prior(
     patterns: Sequence[str],
     pattern_log_priors: Optional[Sequence[float]] = None,
     prior_weight: float = 0.0,
+    char_confidence: Optional[torch.Tensor] = None,
+    confidence_weight: float = 0.0,
 ) -> torch.Tensor:
     if not patterns:
         raise ValueError("patterns must not be empty")
@@ -151,6 +153,18 @@ def color_indices_from_pattern_prior(
         prior_tensor = torch.tensor(pattern_log_priors, dtype=red_scores.dtype, device=red_scores.device)
         log_likelihood = log_likelihood + float(prior_weight) * prior_tensor.view(1, -1)
 
+    if char_confidence is not None and float(confidence_weight) != 0.0:
+        if char_confidence.shape != red_scores.shape:
+            raise ValueError(
+                f"char_confidence must have shape {tuple(red_scores.shape)}, got {tuple(char_confidence.shape)}"
+            )
+        slot_confidence = char_confidence.to(dtype=red_scores.dtype, device=red_scores.device).clamp(1e-6, 1.0).log()
+        slot_confidence = slot_confidence - slot_confidence.mean(dim=-1, keepdim=True)
+        selected_counts = pattern_tensor.sum(dim=-1).clamp_min(1.0).view(1, -1)
+        confidence_bonus = (pattern_tensor.unsqueeze(0) * slot_confidence.unsqueeze(1)).sum(dim=-1)
+        confidence_bonus = confidence_bonus / selected_counts
+        log_likelihood = log_likelihood + float(confidence_weight) * confidence_bonus
+
     best_pattern_indices = log_likelihood.argmax(dim=1)
     return pattern_tensor[best_pattern_indices].long()
 
@@ -176,6 +190,8 @@ def decode_batch_with_pattern_prior(
     patterns: Sequence[str],
     pattern_log_priors: Optional[Sequence[float]] = None,
     prior_weight: float = 0.0,
+    char_confidence: Optional[torch.Tensor] = None,
+    confidence_weight: float = 0.0,
     fallback_if_empty: bool = True,
 ) -> list[str]:
     color_indices = color_indices_from_pattern_prior(
@@ -183,6 +199,8 @@ def decode_batch_with_pattern_prior(
         patterns=patterns,
         pattern_log_priors=pattern_log_priors,
         prior_weight=prior_weight,
+        char_confidence=char_confidence,
+        confidence_weight=confidence_weight,
     )
     return decode_batch_final(
         char_indices,

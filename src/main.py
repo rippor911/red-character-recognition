@@ -71,6 +71,7 @@ class TrainConfig:
     threshold_steps: int = 19
     use_pattern_prior: bool = True
     pattern_prior_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
+    pattern_confidence_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0)
     use_balanced_sampler: bool = True
     save_val_diagnostics: bool = True
     max_error_samples: int = 200
@@ -121,6 +122,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--threshold-steps", type=int, default=19)
     parser.add_argument("--no-pattern-prior", action="store_true")
     parser.add_argument("--pattern-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
+    parser.add_argument("--pattern-confidence-weights", type=str, default="0,0.25,0.5,1")
     parser.add_argument("--no-balanced-sampler", action="store_true")
     parser.add_argument("--no-val-diagnostics", action="store_true")
     parser.add_argument("--max-error-samples", type=int, default=200)
@@ -168,6 +170,7 @@ def parse_args() -> TrainConfig:
         threshold_steps=args.threshold_steps,
         use_pattern_prior=not args.no_pattern_prior,
         pattern_prior_weights=parse_float_sequence(args.pattern_prior_weights),
+        pattern_confidence_weights=parse_float_sequence(args.pattern_confidence_weights),
         use_balanced_sampler=not args.no_balanced_sampler,
         save_val_diagnostics=not args.no_val_diagnostics,
         max_error_samples=args.max_error_samples,
@@ -549,6 +552,7 @@ def evaluate(
     pattern_candidates: Optional[Sequence[str]] = None,
     pattern_log_priors: Optional[Sequence[float]] = None,
     pattern_prior_weights: Sequence[float] = (0.0,),
+    pattern_confidence_weights: Sequence[float] = (0.0,),
 ) -> dict[str, object]:
     model.eval()
     total_loss = 0.0
@@ -566,6 +570,7 @@ def evaluate(
     total_by_slot = torch.zeros(5, dtype=torch.long)
     all_pred_chars: list[torch.Tensor] = []
     all_red_probs: list[torch.Tensor] = []
+    all_char_confidence: list[torch.Tensor] = []
     all_target_chars: list[torch.Tensor] = []
     all_target_colors: list[torch.Tensor] = []
     all_target_final: list[str] = []
@@ -580,6 +585,7 @@ def evaluate(
         pred_chars = char_logits.argmax(dim=-1)
         pred_colors = color_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
+        char_confidence = torch.softmax(char_logits, dim=-1).max(dim=-1).values
         pred_final = decode_batch_final(pred_chars, pred_colors, red_probs, fallback_if_empty=True)
         target_final = decode_batch_final(char_target, color_target, fallback_if_empty=False)
 
@@ -600,12 +606,14 @@ def evaluate(
         total_by_slot[:slot_count] += batch_size
         all_pred_chars.append(pred_chars.detach().cpu())
         all_red_probs.append(red_probs.detach().cpu())
+        all_char_confidence.append(char_confidence.detach().cpu())
         all_target_chars.append(char_target.detach().cpu())
         all_target_colors.append(color_target.detach().cpu())
         all_target_final.extend(target_final)
 
     pred_chars_all = torch.cat(all_pred_chars, dim=0)
     red_probs_all = torch.cat(all_red_probs, dim=0)
+    char_confidence_all = torch.cat(all_char_confidence, dim=0)
     target_chars_all = torch.cat(all_target_chars, dim=0)
     target_colors_all = torch.cat(all_target_colors, dim=0)
     best_threshold = 0.5
@@ -667,37 +675,49 @@ def evaluate(
     best_pattern_correct = -1
     best_pattern_color_correct = 0
     best_pattern_prior_weight = 0.0
+    best_pattern_confidence_weight = 0.0
     use_pattern_candidates = bool(pattern_candidates)
     if use_pattern_candidates:
         candidate_weights = list(pattern_prior_weights) or [0.0]
         if 0.0 not in candidate_weights:
             candidate_weights.insert(0, 0.0)
+        candidate_confidence_weights = list(pattern_confidence_weights) or [0.0]
+        if 0.0 not in candidate_confidence_weights:
+            candidate_confidence_weights.insert(0, 0.0)
         for prior_weight in candidate_weights:
-            pattern_final = decode_batch_with_pattern_prior(
-                pred_chars_all,
-                red_probs_all,
-                patterns=pattern_candidates,
-                pattern_log_priors=pattern_log_priors,
-                prior_weight=float(prior_weight),
-                fallback_if_empty=True,
-            )
-            pattern_correct = sum(
-                pred == target for pred, target in zip(pattern_final, all_target_final)
-            )
-            pattern_colors = color_indices_from_pattern_prior(
-                red_probs_all,
-                patterns=pattern_candidates,
-                pattern_log_priors=pattern_log_priors,
-                prior_weight=float(prior_weight),
-            )
-            pattern_color_correct = (pattern_colors == target_colors_all).all(dim=1).sum().item()
-            if pattern_correct > best_pattern_correct or (
-                pattern_correct == best_pattern_correct
-                and abs(float(prior_weight)) < abs(best_pattern_prior_weight)
-            ):
-                best_pattern_correct = pattern_correct
-                best_pattern_color_correct = int(pattern_color_correct)
-                best_pattern_prior_weight = float(prior_weight)
+            for confidence_weight in candidate_confidence_weights:
+                pattern_final = decode_batch_with_pattern_prior(
+                    pred_chars_all,
+                    red_probs_all,
+                    patterns=pattern_candidates,
+                    pattern_log_priors=pattern_log_priors,
+                    prior_weight=float(prior_weight),
+                    char_confidence=char_confidence_all,
+                    confidence_weight=float(confidence_weight),
+                    fallback_if_empty=True,
+                )
+                pattern_correct = sum(
+                    pred == target for pred, target in zip(pattern_final, all_target_final)
+                )
+                pattern_colors = color_indices_from_pattern_prior(
+                    red_probs_all,
+                    patterns=pattern_candidates,
+                    pattern_log_priors=pattern_log_priors,
+                    prior_weight=float(prior_weight),
+                    char_confidence=char_confidence_all,
+                    confidence_weight=float(confidence_weight),
+                )
+                pattern_color_correct = (pattern_colors == target_colors_all).all(dim=1).sum().item()
+                current_complexity = abs(best_pattern_confidence_weight) + abs(best_pattern_prior_weight)
+                candidate_complexity = abs(float(confidence_weight)) + abs(float(prior_weight))
+                if pattern_correct > best_pattern_correct or (
+                    pattern_correct == best_pattern_correct
+                    and candidate_complexity < current_complexity
+                ):
+                    best_pattern_correct = pattern_correct
+                    best_pattern_color_correct = int(pattern_color_correct)
+                    best_pattern_prior_weight = float(prior_weight)
+                    best_pattern_confidence_weight = float(confidence_weight)
     else:
         best_pattern_correct = best_threshold_correct
         best_pattern_color_correct = int(best_threshold_color_correct)
@@ -706,14 +726,16 @@ def evaluate(
     color_decode_method = "threshold"
     if use_pattern_candidates and best_pattern_correct > best_threshold_correct:
         calibrated_correct = best_pattern_correct
-        color_decode_method = "pattern_prior"
-    if color_decode_method == "pattern_prior":
+        color_decode_method = "pattern_confidence" if best_pattern_confidence_weight != 0.0 else "pattern_prior"
+    if color_decode_method in {"pattern_prior", "pattern_confidence"}:
         calibrated_final = decode_batch_with_pattern_prior(
             pred_chars_all,
             red_probs_all,
             patterns=pattern_candidates or (),
             pattern_log_priors=pattern_log_priors,
             prior_weight=best_pattern_prior_weight,
+            char_confidence=char_confidence_all,
+            confidence_weight=best_pattern_confidence_weight,
             fallback_if_empty=True,
         )
         calibrated_colors = color_indices_from_pattern_prior(
@@ -721,6 +743,8 @@ def evaluate(
             patterns=pattern_candidates or (),
             pattern_log_priors=pattern_log_priors,
             prior_weight=best_pattern_prior_weight,
+            char_confidence=char_confidence_all,
+            confidence_weight=best_pattern_confidence_weight,
         )
     else:
         calibrated_final = decode_batch_with_threshold(
@@ -780,6 +804,7 @@ def evaluate(
         "pattern_final_exact_acc": best_pattern_correct / total_samples,
         "pattern_color_acc": best_pattern_color_correct / total_samples,
         "pattern_prior_weight": best_pattern_prior_weight,
+        "pattern_confidence_weight": best_pattern_confidence_weight,
         "calibrated_final_exact_acc": calibrated_correct / total_samples,
         "char_oracle_final_exact_acc": char_oracle_correct / total_samples,
         "color_oracle_final_exact_acc": color_oracle_correct / total_samples,
@@ -995,10 +1020,11 @@ def save_validation_diagnostics(
     color_pattern_candidates: Sequence[str] = (),
     color_pattern_log_priors: Sequence[float] = (),
     pattern_prior_weight: float = 0.0,
+    pattern_confidence_weight: float = 0.0,
 ) -> tuple[Path, Path]:
     model.eval()
     rows: list[dict[str, object]] = []
-    use_pattern_prior = color_decode_method == "pattern_prior" and bool(color_pattern_candidates)
+    use_pattern_prior = color_decode_method in {"pattern_prior", "pattern_confidence"} and bool(color_pattern_candidates)
 
     for batch in loader:
         images = batch["image"].to(device)
@@ -1018,6 +1044,8 @@ def save_validation_diagnostics(
                 patterns=color_pattern_candidates,
                 pattern_log_priors=color_pattern_log_priors,
                 prior_weight=pattern_prior_weight,
+                char_confidence=char_conf,
+                confidence_weight=pattern_confidence_weight,
             )
         else:
             pattern_colors = threshold_colors
@@ -1036,6 +1064,8 @@ def save_validation_diagnostics(
                 patterns=color_pattern_candidates,
                 pattern_log_priors=color_pattern_log_priors,
                 prior_weight=pattern_prior_weight,
+                char_confidence=char_conf,
+                confidence_weight=pattern_confidence_weight,
                 fallback_if_empty=True,
             )
         else:
@@ -1086,6 +1116,9 @@ def save_validation_diagnostics(
                 "pred_color_threshold": threshold_color,
                 "pred_color_pattern_prior": pattern_color,
                 "pred_color_calibrated": calibrated_color,
+                "color_decode_method": color_decode_method,
+                "pattern_prior_weight": pattern_prior_weight,
+                "pattern_confidence_weight": pattern_confidence_weight,
                 "pred_red_count_calibrated": calibrated_red_count,
                 "pred_label_argmax": pred_final[row_index],
                 "pred_label_threshold": pred_threshold_final[row_index],
@@ -1248,6 +1281,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             "Color pattern prior: "
             f"on candidates={len(pattern_candidates)} "
             f"weights={','.join(f'{weight:g}' for weight in config.pattern_prior_weights)} "
+            f"confidence_weights={','.join(f'{weight:g}' for weight in config.pattern_confidence_weights)} "
             f"top={format_pattern_summary(pattern_candidates, pattern_log_priors)}"
         )
     else:
@@ -1283,6 +1317,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             pattern_candidates=pattern_candidates,
             pattern_log_priors=pattern_log_priors,
             pattern_prior_weights=config.pattern_prior_weights,
+            pattern_confidence_weights=config.pattern_confidence_weights,
         )
         eval_metrics = raw_eval_metrics
         eval_source = "raw"
@@ -1301,6 +1336,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     pattern_candidates=pattern_candidates,
                     pattern_log_priors=pattern_log_priors,
                     pattern_prior_weights=config.pattern_prior_weights,
+                    pattern_confidence_weights=config.pattern_confidence_weights,
                 )
             if eval_metric_is_better(ema_eval_metrics, raw_eval_metrics):
                 eval_metrics = ema_eval_metrics
@@ -1318,6 +1354,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"color_thresholds={format_thresholds(eval_metrics['color_thresholds'])} "
             f"pattern_final_exact_acc={eval_metrics['pattern_final_exact_acc']:.4f} "
             f"pattern_prior_weight={eval_metrics['pattern_prior_weight']:.2f} "
+            f"pattern_confidence_weight={eval_metrics['pattern_confidence_weight']:.2f} "
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
             f"char_sequence_acc={eval_metrics['char_sequence_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
@@ -1374,6 +1411,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "color_pattern_candidates": pattern_candidates,
                     "color_pattern_log_priors": pattern_log_priors,
                     "pattern_prior_weight": eval_metrics["pattern_prior_weight"],
+                    "pattern_confidence_weight": eval_metrics["pattern_confidence_weight"],
                     "model_source": eval_source,
                     "ema_decay": config.ema_decay if ema is not None else None,
                     "scheduler": "warmup+cosine" if scheduler is not None else None,
@@ -1418,6 +1456,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.color_pattern_candidates = tuple(checkpoint.get("color_pattern_candidates", ()))
     model.color_pattern_log_priors = tuple(float(item) for item in checkpoint.get("color_pattern_log_priors", ()))
     model.pattern_prior_weight = float(checkpoint.get("pattern_prior_weight", model.best_metrics.get("pattern_prior_weight", 0.0)))
+    model.pattern_confidence_weight = float(
+        checkpoint.get("pattern_confidence_weight", model.best_metrics.get("pattern_confidence_weight", 0.0))
+    )
     model.model_source = str(checkpoint.get("model_source", "raw"))
     model.tta_shifts = tuple(checkpoint.get("tta_shifts", eval_tta_shifts))
     model.tta_scales = tuple(checkpoint.get("tta_scales", eval_tta_scales))
@@ -1436,6 +1477,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             color_pattern_candidates=model.color_pattern_candidates,
             color_pattern_log_priors=model.color_pattern_log_priors,
             pattern_prior_weight=model.pattern_prior_weight,
+            pattern_confidence_weight=model.pattern_confidence_weight,
         )
     return model
 
@@ -1462,13 +1504,15 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     color_pattern_candidates = tuple(getattr(model, "color_pattern_candidates", ()))
     color_pattern_log_priors = tuple(getattr(model, "color_pattern_log_priors", ()))
     pattern_prior_weight = float(getattr(model, "pattern_prior_weight", 0.0))
+    pattern_confidence_weight = float(getattr(model, "pattern_confidence_weight", 0.0))
     tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts if config.use_tta else (0,)))
     tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales if config.use_tta else (1.0,)))
-    use_pattern_prior = color_decode_method == "pattern_prior" and bool(color_pattern_candidates)
+    use_pattern_prior = color_decode_method in {"pattern_prior", "pattern_confidence"} and bool(color_pattern_candidates)
     if use_pattern_prior:
         print(
             "Using color pattern prior for test decoding "
-            f"(candidates={len(color_pattern_candidates)}, prior_weight={pattern_prior_weight:.2f})"
+            f"(method={color_decode_method}, candidates={len(color_pattern_candidates)}, "
+            f"prior_weight={pattern_prior_weight:.2f}, confidence_weight={pattern_confidence_weight:.2f})"
         )
     else:
         print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
@@ -1479,6 +1523,7 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
         char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
         pred_chars = char_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
+        char_confidence = torch.softmax(char_logits, dim=-1).max(dim=-1).values
         if use_pattern_prior:
             predictions.extend(
                 decode_batch_with_pattern_prior(
@@ -1487,6 +1532,8 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
                     patterns=color_pattern_candidates,
                     pattern_log_priors=color_pattern_log_priors,
                     prior_weight=pattern_prior_weight,
+                    char_confidence=char_confidence,
+                    confidence_weight=pattern_confidence_weight,
                     fallback_if_empty=True,
                 )
             )
