@@ -1,6 +1,7 @@
 dataset/
 outputs/
 checkpoints/
+logs/
 __pycache__/
 *.pyc
 .venv/

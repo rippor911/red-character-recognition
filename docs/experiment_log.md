@@ -819,3 +819,139 @@ python -u src/main.py \
   --num-workers 2 \
   --device cuda
 ```
+
+## 2026-06-19 Character-Weighted High-Resolution Fine-Tune E2
+
+Motivation:
+
+- The previous high-resolution fine-tune reached 0.9832 with only 84 validation errors.
+- Error analysis showed 78/84 errors still had full-character mistakes, while only 7/84 had color decoding mistakes.
+- The most frequent confusions were `I->1`, `O->0`, `1->I`, `Q->O` and `E->F`, so I shifted more training weight to the character head.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_highres_ft_charweight_e2 \
+  --checkpoint-dir checkpoints/convnext_highres_ft_charweight_e2 \
+  --init-checkpoint checkpoints/convnext_highres_ft_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 128 \
+  --image-width 384 \
+  --learning-rate 2e-5 \
+  --epochs 2 \
+  --batch-size 24 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Best result:
+
+```text
+best_epoch=1
+selected_model=raw
+train_loss=0.3735
+val_loss=0.0510
+final_exact_acc=0.9824
+threshold_final_exact_acc=0.9836
+calibrated_final_exact_acc=0.9836
+char_slot_acc=0.99136
+char_sequence_acc=0.9576
+color_slot_acc=0.99936
+color_pattern_acc=0.9970
+char_oracle_final_exact_acc=0.9982
+color_oracle_final_exact_acc=0.9854
+color_thresholds=0.700,0.500,0.950,0.800,0.950
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_highres_finetune_E1=0.9832
+ConvNeXt_highres_char_weight_E1=0.9836
+gain_vs_baseline=+0.0648
+gain_vs_previous_best=+0.0004
+baseline_error=0.0812
+char_weight_error=0.0164
+relative_error_reduction_vs_baseline=(0.0812 - 0.0164) / 0.0812 = 79.8%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Validation error analysis:
+
+```text
+errors=82
+char_all_wrong=74
+color_wrong=9
+length_wrong=9
+top_confusions=I->1:5, O->0:4, 1->I:4, Q->O:4, P->R:3, U->J:3, X->Y:3
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_highres_ft_charweight_e2/submission.csv
+columns=id,label
+rows=5000
+unique_ids=5000
+labels_match_[0-9A-Z]{1,5}=True
+```
+
+Takeaways:
+
+- Character-weighted fine-tuning is a small positive ablation over the previous best.
+- The best epoch selected the raw model rather than EMA, so further low-learning-rate runs should not assume EMA always wins.
+- Remaining mistakes are still dominated by visually similar characters, making confusion-aware augmentation or higher-resolution crops the next likely improvement direction.
+
+Artifacts:
+
+```text
+checkpoints/convnext_highres_ft_charweight_e2/baseline_best.pt
+outputs/convnext_highres_ft_charweight_e2/training_history.csv
+outputs/convnext_highres_ft_charweight_e2/val_predictions.csv
+outputs/convnext_highres_ft_charweight_e2/val_errors.csv
+outputs/convnext_highres_ft_charweight_e2/submission.csv
+logs/convnext_highres_ft_charweight_e2.out.log
+logs/convnext_highres_ft_charweight_e2.err.log
+```
+
+## Updated Current Best 4
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + 128x384 input + checkpoint fine-tuning + character-weighted loss
+checkpoint=checkpoints/convnext_highres_ft_charweight_e2/baseline_best.pt
+submission=outputs/convnext_highres_ft_charweight_e2/submission.csv
+calibrated_final_exact_acc=0.9836
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0648
+relative_error_reduction=79.8%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_highres_ft_charweight_e2 \
+  --checkpoint-dir checkpoints/convnext_highres_ft_charweight_e2 \
+  --init-checkpoint checkpoints/convnext_highres_ft_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 128 \
+  --image-width 384 \
+  --learning-rate 2e-5 \
+  --epochs 2 \
+  --batch-size 24 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
