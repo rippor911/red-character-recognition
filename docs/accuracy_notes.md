@@ -1,0 +1,33 @@
+# Accuracy Notes
+
+本项目的指标是 `final_exact_acc`：先识别 5 个字符和 5 个颜色位置，再只拼接预测为红色的位置。因此它比单字符准确率更严格，也和通用 OCR 文档识别指标不可直接互换。
+
+## 网上常见准确率区间
+
+调研结论：固定长度、字符集有限的验证码/字符识别任务，在训练集和测试集分布接近时，公开论文和工程报告里常见目标是 `95%+`；较强的深度学习模型经常报告接近 `99%` 或更高的整串准确率。不过这些数值强依赖验证码样式、噪声、是否粘连、是否合成数据同分布、评价口径和是否集成。
+
+| 来源 | 任务/模型 | 公开结果 | 对本项目的启发 |
+| --- | --- | --- | --- |
+| [CAPTCHA recognition based on deep convolutional neural network](https://www.aimspress.com/article/doi/10.3934/mbe.2019292?viewType=HTML) / [PubMed](https://pubmed.ncbi.nlm.nih.gov/31499741/) | 基于 CNN/DenseNet 思路的验证码识别 | 带背景噪声和字符粘连的验证码识别准确率报告为 `99.9%+` | 同分布验证码任务可以期待很高准确率，但该方法使用更强 DenseNet/ResNet 思路，本项目仍保持轻量自定义 CNN |
+| [Robust CAPTCHA Recognition with a CNN-RNN-CTC](https://icai.uni-eszterhazy.hu/2026/abstracts/ICAI_2026_abstract_90.pdf) | CNN-RNN-CTC CAPTCHA 识别 | 单模型平均整串准确率 `98.95%`，21 模型集成 `99.70%` | 说明 99% 档通常需要序列建模或集成；本项目暂不使用 CTC/集成，只把它作为上限参照 |
+| [Captcha Recognition Based on Deep Learning](https://dl.acm.org/doi/10.1145/3445945.3445961) | 简单和复杂验证码深度学习识别 | 摘要报告两类数据准确率接近 `99%` | 固定格式验证码的实用目标可设在 `95%-99%` |
+| [A novel CAPTCHA solver framework using deep skipping connections](https://pmc.ncbi.nlm.nih.gov/articles/PMC9044336/) | 带跳连结构的验证码求解器 | 字符识别层面多数接近或达到 `99%` | 单字符准确率高不等于整串准确率高，本项目应优先看 `final_exact_acc` |
+| [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR) / [PP-OCRv5 技术报告](https://arxiv.org/html/2507.05595v1) | 通用 OCR 文本识别 | 官方强调新版本相对旧版显著提升识别准确率，但通用 OCR 指标和验证码整串指标不同 | 通用 OCR 可作为工程参照，不适合作为本课程模型的直接准确率目标 |
+
+## 本项目优化目标
+
+在没有使用预训练、Transformer、CTC、集成和人工测试集修正的前提下，当前优化目标设为：
+
+```text
+first target:  final_exact_acc >= 0.95
+stretch target: final_exact_acc 接近 0.98-0.99
+```
+
+如果官方验证集达不到 `95%`，优先继续排查：
+
+1. 颜色预测是否成为瓶颈：查看 `color_pattern_acc`。
+2. 字符分类是否成为瓶颈：查看 `char_slot_acc`。
+3. 是否需要更长训练：当前推荐先跑 `20-30` epoch。
+4. 是否需要按图像实际样式调整增强强度或输入尺寸。
+
+当前仓库没有官方 `dataset/`，因此还不能证明已经达到上述目标。放入官方数据后，以 README 中的默认命令或推荐命令运行并记录验证集结果。

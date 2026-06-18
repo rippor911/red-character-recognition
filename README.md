@@ -47,12 +47,17 @@ python src/main.py
 
 ```text
 batch_size=64
-epochs=5
+epochs=20
 learning_rate=1e-3
 optimizer=AdamW
 image_size=64x256
 seed=2026
 device=cuda if available else cpu
+weight_decay=1e-4
+label_smoothing=0.03
+train_augmentation=on
+cosine_scheduler=on
+amp=cuda only
 ```
 
 输出文件：
@@ -70,6 +75,8 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 
 `--debug-overfit` 会固定取按文件名排序后的前 N 张训练图像，同时把该子集作为评估集，用于检查标签编码、模型输出、损失和反向传播是否正常。
 
+常见验证码/字符识别器准确率调研和本项目优化目标见 [docs/accuracy_notes.md](docs/accuracy_notes.md)。
+
 ## 模型结构
 
 模型名：`BaselineCNN`
@@ -82,6 +89,7 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 -> AdaptiveAvgPool2d((1, 5))
 -> 5 个位置的 slot feature
 -> 字符分类头 Linear(..., 36)
+-> 颜色统计分支提取每个 slot 的 RGB 均值和 red-minus-other 均值/最大值
 -> 颜色分类头 Linear(..., 2)
 ```
 
@@ -107,6 +115,8 @@ loss = char_loss + color_loss
 ```
 
 两个任务权重均为 1。
+
+正式训练默认对字符分类使用 `label_smoothing=0.03`；`--debug-overfit` 会自动关闭 label smoothing、dropout、scheduler 和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -161,9 +171,12 @@ python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoi
 ```text
 Device: cuda
 Train samples: 7 | val samples: 5
-Model parameters: 988,998
-Epoch 01/1 train_loss=4.2600 val_loss=4.3009 final_exact_acc=0.0000 char_slot_acc=0.0000 color_slot_acc=0.4000 color_pattern_acc=0.0000
+Train augmentation: on | AMP: on
+Dropout: 0.100 | label_smoothing: 0.030 | scheduler: on
+Model parameters: 277,590
+Epoch 01/1 lr=1.00e-03 train_loss=4.1585 val_loss=4.0098 final_exact_acc=0.0000 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000
 Saved best checkpoint
+Saved training_history.csv
 Saved submission.csv
 ```
 
@@ -178,7 +191,9 @@ python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoi
 结果摘要：
 
 ```text
-Epoch 01/30 train_loss=4.1382 debug_train_loss=4.2694 final_exact_acc=0.0000 char_slot_acc=0.0250 color_slot_acc=0.4500 color_pattern_acc=0.0000
+Train augmentation: off | AMP: on
+Dropout: 0.000 | label_smoothing: 0.000 | scheduler: off
+Epoch 01/30 lr=1.00e-03 train_loss=4.1320 debug_train_loss=3.8508 final_exact_acc=0.0000 char_slot_acc=0.0750 color_slot_acc=1.0000 color_pattern_acc=1.0000
 ...
-Epoch 30/30 train_loss=0.0778 debug_train_loss=0.0902 final_exact_acc=1.0000 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000
+Epoch 30/30 lr=1.00e-03 train_loss=0.0015 debug_train_loss=0.0038 final_exact_acc=1.0000 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000
 ```

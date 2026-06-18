@@ -1,9 +1,11 @@
 import argparse
 import random
 from dataclasses import dataclass, field
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -36,8 +38,18 @@ class TrainConfig:
     checkpoint_dir: Path = field(default_factory=lambda: DEFAULT_CHECKPOINT_DIR)
     image_size: tuple[int, int] = (64, 256)
     batch_size: int = 64
-    epochs: int = 5
+    epochs: int = 20
     learning_rate: float = 1e-3
+    weight_decay: float = 1e-4
+    label_smoothing: float = 0.03
+    char_loss_weight: float = 1.0
+    color_loss_weight: float = 1.0
+    max_grad_norm: float = 5.0
+    dropout: float = 0.1
+    head_hidden_dim: int = 256
+    use_augmentation: bool = True
+    use_amp: bool = True
+    use_scheduler: bool = True
     val_ratio: float = 0.1
     seed: int = 2026
     num_workers: int = 0
@@ -56,8 +68,18 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--image-height", type=int, default=64)
     parser.add_argument("--image-width", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--label-smoothing", type=float, default=0.03)
+    parser.add_argument("--char-loss-weight", type=float, default=1.0)
+    parser.add_argument("--color-loss-weight", type=float, default=1.0)
+    parser.add_argument("--max-grad-norm", type=float, default=5.0)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--head-hidden-dim", type=int, default=256)
+    parser.add_argument("--no-augment", action="store_true")
+    parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--no-scheduler", action="store_true")
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -75,6 +97,16 @@ def parse_args() -> TrainConfig:
         batch_size=args.batch_size,
         epochs=args.epochs,
         learning_rate=args.learning_rate,
+        weight_decay=args.weight_decay,
+        label_smoothing=args.label_smoothing,
+        char_loss_weight=args.char_loss_weight,
+        color_loss_weight=args.color_loss_weight,
+        max_grad_norm=args.max_grad_norm,
+        dropout=args.dropout,
+        head_hidden_dim=args.head_hidden_dim,
+        use_augmentation=not args.no_augment,
+        use_amp=not args.no_amp,
+        use_scheduler=not args.no_scheduler,
         val_ratio=args.val_ratio,
         seed=args.seed,
         num_workers=args.num_workers,
@@ -96,9 +128,30 @@ def resolve_device(device_name: str) -> torch.device:
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
+
+
+def seed_worker(worker_id: int) -> None:
+    worker_seed = torch.initial_seed() % 2**32
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def make_grad_scaler(enabled: bool):
+    try:
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    except (AttributeError, TypeError):
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def autocast_context(enabled: bool) -> AbstractContextManager:
+    try:
+        return torch.amp.autocast(device_type="cuda", enabled=enabled)
+    except AttributeError:
+        return torch.cuda.amp.autocast(enabled=enabled)
 
 
 def load_train_data(data_dir: Path = DEFAULT_DATA_DIR) -> pd.DataFrame:
@@ -132,6 +185,7 @@ def build_loader(
         num_workers=num_workers,
         pin_memory=device.type == "cuda",
         generator=generator if shuffle else None,
+        worker_init_fn=seed_worker,
         persistent_workers=num_workers > 0,
     )
 
@@ -141,10 +195,17 @@ def compute_loss(
     color_logits: torch.Tensor,
     char_target: torch.Tensor,
     color_target: torch.Tensor,
+    label_smoothing: float = 0.0,
+    char_loss_weight: float = 1.0,
+    color_loss_weight: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    char_loss = F.cross_entropy(char_logits.reshape(-1, len(CHARSET)), char_target.reshape(-1))
+    char_loss = F.cross_entropy(
+        char_logits.reshape(-1, len(CHARSET)),
+        char_target.reshape(-1),
+        label_smoothing=label_smoothing,
+    )
     color_loss = F.cross_entropy(color_logits.reshape(-1, 2), color_target.reshape(-1))
-    loss = char_loss + color_loss
+    loss = char_loss * char_loss_weight + color_loss * color_loss_weight
     return loss, char_loss, color_loss
 
 
@@ -153,6 +214,12 @@ def train_one_epoch(
     loader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    scaler,
+    use_amp: bool,
+    label_smoothing: float,
+    char_loss_weight: float,
+    color_loss_weight: float,
+    max_grad_norm: float,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -165,10 +232,29 @@ def train_one_epoch(
         char_target = batch["char_target"].to(device)
         color_target = batch["color_target"].to(device)
         optimizer.zero_grad(set_to_none=True)
-        char_logits, color_logits = model(images)
-        loss, char_loss, color_loss = compute_loss(char_logits, color_logits, char_target, color_target)
-        loss.backward()
-        optimizer.step()
+        with autocast_context(use_amp):
+            char_logits, color_logits = model(images)
+            loss, char_loss, color_loss = compute_loss(
+                char_logits,
+                color_logits,
+                char_target,
+                color_target,
+                label_smoothing=label_smoothing,
+                char_loss_weight=char_loss_weight,
+                color_loss_weight=color_loss_weight,
+            )
+        if scaler.is_enabled():
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            loss.backward()
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            optimizer.step()
 
         batch_size = images.size(0)
         total_samples += batch_size
@@ -234,6 +320,13 @@ def count_parameters(model: nn.Module) -> int:
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
 
 
+def load_checkpoint(path: Path, device: torch.device) -> dict[str, object]:
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
+
+
 def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> BaselineCNN:
     config = config or TrainConfig()
     set_seed(config.seed)
@@ -249,7 +342,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         train_split, val_split = split_train_val(train_df, val_ratio=config.val_ratio, seed=config.seed)
         eval_name = "val"
 
-    train_dataset = RedCharacterTrainDataset(train_split, train_image_dir, config.image_size)
+    train_augment = config.use_augmentation and not config.debug_overfit
+    train_dataset = RedCharacterTrainDataset(train_split, train_image_dir, config.image_size, augment=train_augment)
     val_dataset = RedCharacterTrainDataset(val_split, train_image_dir, config.image_size)
     train_loader = build_loader(
         train_dataset, config.batch_size, shuffle=True, seed=config.seed, num_workers=config.num_workers, device=device
@@ -258,23 +352,59 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         val_dataset, config.batch_size, shuffle=False, seed=config.seed, num_workers=config.num_workers, device=device
     )
 
-    model = BaselineCNN(num_chars=len(CHARSET)).to(device)
+    model_dropout = 0.0 if config.debug_overfit else config.dropout
+    train_label_smoothing = 0.0 if config.debug_overfit else config.label_smoothing
+    train_scheduler_enabled = config.use_scheduler and not config.debug_overfit
+
+    model = BaselineCNN(
+        num_chars=len(CHARSET),
+        dropout=model_dropout,
+        head_hidden_dim=config.head_hidden_dim,
+    ).to(device)
     model.image_size = config.image_size
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
+    scheduler = (
+        torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, config.epochs))
+        if train_scheduler_enabled
+        else None
+    )
+    use_amp = config.use_amp and device.type == "cuda"
+    scaler = make_grad_scaler(use_amp)
     config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    config.output_dir.mkdir(parents=True, exist_ok=True)
     best_path = config.checkpoint_dir / "baseline_best.pt"
     best_score = -1.0
+    best_loss = float("inf")
     best_metrics: dict[str, float] = {}
+    history: list[dict[str, float | int | str]] = []
 
     print(f"Device: {device}")
     print(f"Train samples: {len(train_dataset)} | {eval_name} samples: {len(val_dataset)}")
+    print(f"Train augmentation: {'on' if train_augment else 'off'} | AMP: {'on' if use_amp else 'off'}")
+    print(
+        f"Dropout: {model_dropout:.3f} | label_smoothing: {train_label_smoothing:.3f} "
+        f"| scheduler: {'on' if scheduler is not None else 'off'}"
+    )
     print(f"Model parameters: {count_parameters(model):,}")
 
     for epoch in range(1, config.epochs + 1):
-        train_metrics = train_one_epoch(model, train_loader, optimizer, device)
+        current_lr = optimizer.param_groups[0]["lr"]
+        train_metrics = train_one_epoch(
+            model,
+            train_loader,
+            optimizer,
+            device,
+            scaler=scaler,
+            use_amp=use_amp,
+            label_smoothing=train_label_smoothing,
+            char_loss_weight=config.char_loss_weight,
+            color_loss_weight=config.color_loss_weight,
+            max_grad_norm=config.max_grad_norm,
+        )
         eval_metrics = evaluate(model, val_loader, device)
         print(
             f"Epoch {epoch:02d}/{config.epochs} "
+            f"lr={current_lr:.2e} "
             f"train_loss={train_metrics['loss']:.4f} "
             f"{eval_name}_loss={eval_metrics['loss']:.4f} "
             f"final_exact_acc={eval_metrics['final_exact_acc']:.4f} "
@@ -282,8 +412,20 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
             f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f}"
         )
-        if eval_metrics["final_exact_acc"] > best_score:
+        history.append(
+            {
+                "epoch": epoch,
+                "lr": current_lr,
+                **{f"train_{key}": value for key, value in train_metrics.items()},
+                **{f"{eval_name}_{key}": value for key, value in eval_metrics.items()},
+            }
+        )
+        is_better = eval_metrics["final_exact_acc"] > best_score or (
+            eval_metrics["final_exact_acc"] == best_score and eval_metrics["loss"] < best_loss
+        )
+        if is_better:
             best_score = eval_metrics["final_exact_acc"]
+            best_loss = eval_metrics["loss"]
             best_metrics = eval_metrics
             torch.save(
                 {
@@ -296,8 +438,14 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                 best_path,
             )
             print(f"Saved best checkpoint to {best_path}")
+        if scheduler is not None:
+            scheduler.step()
 
-    checkpoint = torch.load(best_path, map_location=device)
+    history_path = config.output_dir / "training_history.csv"
+    pd.DataFrame(history).to_csv(history_path, index=False)
+    print(f"Saved training history to {history_path}")
+
+    checkpoint = load_checkpoint(best_path, device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.best_checkpoint_path = best_path
     model.best_metrics = checkpoint.get("metrics", {})

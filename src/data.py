@@ -6,7 +6,7 @@ from typing import Iterable, Optional, Sequence
 import numpy as np
 import pandas as pd
 import torch
-from PIL import Image
+from PIL import Image, ImageEnhance
 from torch.utils.data import Dataset
 
 
@@ -18,6 +18,7 @@ IDX_TO_COLOR = {0: "u", 1: "r"}
 NUM_SLOTS = 5
 
 _RESAMPLE_BILINEAR = getattr(Image, "Resampling", Image).BILINEAR
+_TRANSFORM_AFFINE = getattr(getattr(Image, "Transform", Image), "AFFINE")
 _LABEL_RE = re.compile(rf"^[{CHARSET}]{{1,{NUM_SLOTS}}}$")
 
 
@@ -41,10 +42,34 @@ def encode_colors(color: str) -> list[int]:
         raise ValueError(f"unknown color marker {exc.args[0]!r} in color {color!r}") from exc
 
 
-def load_image_tensor(image_path: Path, image_size: tuple[int, int]) -> torch.Tensor:
+def apply_train_augmentation(image: Image.Image) -> Image.Image:
+    if random.random() < 0.75:
+        angle = random.uniform(-4.0, 4.0)
+        image = image.rotate(angle, resample=_RESAMPLE_BILINEAR, fillcolor=(255, 255, 255))
+    if random.random() < 0.75:
+        shift_x = random.uniform(-3.0, 3.0)
+        shift_y = random.uniform(-2.0, 2.0)
+        image = image.transform(
+            image.size,
+            _TRANSFORM_AFFINE,
+            (1.0, 0.0, shift_x, 0.0, 1.0, shift_y),
+            resample=_RESAMPLE_BILINEAR,
+            fillcolor=(255, 255, 255),
+        )
+    if random.random() < 0.35:
+        image = ImageEnhance.Contrast(image).enhance(random.uniform(0.9, 1.15))
+    if random.random() < 0.25:
+        image = ImageEnhance.Brightness(image).enhance(random.uniform(0.92, 1.08))
+    return image
+
+
+def load_image_tensor(image_path: Path, image_size: tuple[int, int], augment: bool = False) -> torch.Tensor:
     height, width = image_size
     with Image.open(image_path) as image:
-        image = image.convert("RGB").resize((width, height), _RESAMPLE_BILINEAR)
+        image = image.convert("RGB")
+        if augment:
+            image = apply_train_augmentation(image)
+        image = image.resize((width, height), _RESAMPLE_BILINEAR)
         array = np.asarray(image, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
     return (tensor - 0.5) / 0.5
@@ -145,11 +170,12 @@ def split_train_val(
 
 
 class RedCharacterTrainDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, image_dir: Path, image_size: tuple[int, int]):
+    def __init__(self, df: pd.DataFrame, image_dir: Path, image_size: tuple[int, int], augment: bool = False):
         validate_train_frame(df)
         self.df = df.reset_index(drop=True).copy()
         self.image_dir = Path(image_dir)
         self.image_size = image_size
+        self.augment = augment
 
     def __len__(self) -> int:
         return len(self.df)
@@ -157,7 +183,7 @@ class RedCharacterTrainDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, object]:
         row = self.df.iloc[index]
         filename = str(row["filename"])
-        image = load_image_tensor(self.image_dir / filename, self.image_size)
+        image = load_image_tensor(self.image_dir / filename, self.image_size, augment=self.augment)
         char_target = torch.tensor(encode_chars(str(row["all_label"])), dtype=torch.long)
         color_target = torch.tensor(encode_colors(str(row["color"])), dtype=torch.long)
         return {
@@ -180,7 +206,7 @@ class RedCharacterTestDataset(Dataset):
 
     def __getitem__(self, index: int) -> dict[str, object]:
         filename = str(self.df.iloc[index]["id"])
-        image = load_image_tensor(self.image_dir / filename, self.image_size)
+        image = load_image_tensor(self.image_dir / filename, self.image_size, augment=False)
         return {"image": image, "filename": filename}
 
 
