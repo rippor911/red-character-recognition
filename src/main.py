@@ -65,6 +65,7 @@ class TrainConfig:
     head_hidden_dim: int = 384
     position_specific_heads: bool = True
     slot_pooling: str = "avgmax"
+    slot_extractor: str = "pool"
     use_slot_context: bool = True
     normalization: str = "dataset"
     normalization_samples: int = 2048
@@ -129,6 +130,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--head-hidden-dim", type=int, default=384)
     parser.add_argument("--shared-heads", action="store_true")
     parser.add_argument("--slot-pooling", choices=["avg", "max", "avgmax"], default="avgmax")
+    parser.add_argument("--slot-extractor", choices=["pool", "query", "pool_query"], default="pool")
     parser.add_argument("--no-slot-context", action="store_true")
     parser.add_argument("--normalization", choices=["dataset", "imagenet", "fixed", "none"], default="dataset")
     parser.add_argument("--normalization-samples", type=int, default=2048)
@@ -190,6 +192,7 @@ def parse_args() -> TrainConfig:
         head_hidden_dim=args.head_hidden_dim,
         position_specific_heads=not args.shared_heads,
         slot_pooling=args.slot_pooling,
+        slot_extractor=args.slot_extractor,
         use_slot_context=not args.no_slot_context,
         normalization=args.normalization,
         normalization_samples=args.normalization_samples,
@@ -246,6 +249,7 @@ def build_model(
     slot_pooling: str,
     use_slot_context: bool,
     pretrained_backbone: bool = True,
+    slot_extractor: str = "pool",
 ) -> nn.Module:
     if model_name == "baseline_cnn":
         return BaselineCNN(
@@ -267,6 +271,7 @@ def build_model(
             slot_pooling=slot_pooling,
             use_slot_context=use_slot_context,
             pretrained=pretrained_backbone,
+            slot_extractor=slot_extractor,
         )
     raise ValueError(f"unknown model_name: {model_name}")
 
@@ -1655,6 +1660,7 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
         slot_pooling=str(model_config.get("slot_pooling", "avg")),
         use_slot_context=bool(model_config.get("use_slot_context", False)),
         pretrained_backbone=False,
+        slot_extractor=str(model_config.get("slot_extractor", "pool")),
     ).to(device)
     model.load_state_dict(checkpoint["model_state_dict"], strict=True)
     restore_checkpoint_metadata(
@@ -1901,6 +1907,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         slot_pooling=config.slot_pooling,
         use_slot_context=config.use_slot_context,
         pretrained_backbone=config.pretrained_backbone,
+        slot_extractor=config.slot_extractor,
     ).to(device)
     model.image_size = config.image_size
     model.input_mean = normalization_for_storage(input_mean)
@@ -1952,7 +1959,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         print("Char class weights: off")
     else:
         print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
-    print(f"Slot pooling: {config.slot_pooling} | slot_context: {'on' if config.use_slot_context else 'off'}")
+    print(
+        f"Slot pooling: {config.slot_pooling} | "
+        f"slot_extractor: {config.slot_extractor} | "
+        f"slot_context: {'on' if config.use_slot_context else 'off'}"
+    )
     if char_prior_enabled:
         print(
             "Char position prior: "
@@ -2122,6 +2133,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                         "num_chars": len(CHARSET),
                         "position_specific_heads": config.position_specific_heads,
                         "slot_pooling": config.slot_pooling,
+                        "slot_extractor": config.slot_extractor,
                         "use_slot_context": config.use_slot_context,
                         "pretrained_backbone": config.pretrained_backbone,
                         "dropout": model_dropout,

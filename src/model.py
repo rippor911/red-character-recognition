@@ -85,6 +85,27 @@ class SlotContextBlock(nn.Module):
         return slot_features + self.dropout(context)
 
 
+class FixedSlotFeatureRearranger(nn.Module):
+    def __init__(self, in_dim: int, feature_dim: int, num_slots: int, dropout: float):
+        super().__init__()
+        self.query = nn.Parameter(torch.randn(1, num_slots, feature_dim) * 0.02)
+        self.key = nn.Linear(in_dim, feature_dim)
+        self.value = nn.Linear(in_dim, feature_dim)
+        self.out_norm = nn.LayerNorm(feature_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.scale = feature_dim ** -0.5
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        tokens = features.flatten(2).transpose(1, 2).contiguous()
+        keys = self.key(tokens)
+        values = self.value(tokens)
+        queries = self.query.expand(features.size(0), -1, -1)
+        attention = torch.matmul(queries, keys.transpose(1, 2)) * self.scale
+        attention = attention.softmax(dim=-1)
+        slot_features = torch.matmul(attention, values)
+        return self.out_norm(self.dropout(slot_features))
+
+
 class BaselineCNN(nn.Module):
     def __init__(
         self,
@@ -226,16 +247,20 @@ class PretrainedConvNeXtSlotModel(nn.Module):
         slot_pooling: str = "avgmax",
         use_slot_context: bool = True,
         pretrained: bool = True,
+        slot_extractor: str = "pool",
     ):
         super().__init__()
         if slot_pooling not in {"avg", "max", "avgmax"}:
             raise ValueError(f"slot_pooling must be one of avg, max, avgmax; got {slot_pooling!r}")
+        if slot_extractor not in {"pool", "query", "pool_query"}:
+            raise ValueError(f"slot_extractor must be one of pool, query, pool_query; got {slot_extractor!r}")
         self.num_slots = num_slots
         self.num_chars = num_chars
         self.position_specific_heads = position_specific_heads
         self.slot_pooling = slot_pooling
         self.use_slot_context = use_slot_context
         self.pretrained = pretrained
+        self.slot_extractor = slot_extractor
 
         weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
         convnext = convnext_tiny(weights=weights)
@@ -248,6 +273,13 @@ class PretrainedConvNeXtSlotModel(nn.Module):
         self.slot_projection = nn.Sequential(
             nn.LayerNorm(pooled_feature_dim),
             nn.Linear(pooled_feature_dim, feature_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.slot_rearranger = FixedSlotFeatureRearranger(backbone_dim, feature_dim, num_slots, dropout)
+        self.slot_fusion = nn.Sequential(
+            nn.LayerNorm(feature_dim * 2),
+            nn.Linear(feature_dim * 2, feature_dim),
             nn.GELU(),
             nn.Dropout(dropout),
         )
@@ -316,7 +348,15 @@ class PretrainedConvNeXtSlotModel(nn.Module):
                 slot_features = max_slot_features
             else:
                 slot_features = torch.cat([avg_slot_features, max_slot_features], dim=-1)
-        slot_features = self.slot_projection(slot_features)
+        pooled_slot_features = self.slot_projection(slot_features)
+        if self.slot_extractor == "pool":
+            slot_features = pooled_slot_features
+        else:
+            query_slot_features = self.slot_rearranger(features)
+            if self.slot_extractor == "query":
+                slot_features = query_slot_features
+            else:
+                slot_features = self.slot_fusion(torch.cat([pooled_slot_features, query_slot_features], dim=-1))
         slot_features = slot_features + self.position_embedding
         slot_features = self.slot_context(slot_features)
 

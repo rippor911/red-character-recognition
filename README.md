@@ -125,6 +125,14 @@ python src/main.py --model convnext_tiny --normalization imagenet --image-height
 
 `--model baseline_cnn` 是默认小 CNN；`--model convnext_tiny` 会使用 TorchVision `ConvNeXt_Tiny_Weights.IMAGENET1K_V1` 初始化视觉 backbone。若只想验证结构、不加载预训练权重，可加 `--no-pretrained-backbone`。预训练模型来源和实验过程记录在 [docs/experiment_log.md](docs/experiment_log.md)。
 
+SVTRv2 启发的固定槽位特征重排实验：
+
+```bash
+python src/main.py --model convnext_tiny --slot-extractor pool_query --normalization imagenet --image-height 96 --image-width 320 --learning-rate 3e-4 --batch-size 32
+```
+
+`pool_query` 会在原有池化 slot 之外加入 5 个 learned slot query，从 ConvNeXt 特征图中抽取固定五字符位置的重排特征；这是对 SVTRv2 Feature Rearranging 思想的任务定制轻量化版本。
+
 ## 模型结构
 
 模型名：`BaselineCNN`

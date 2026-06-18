@@ -294,3 +294,82 @@ outputs/convnext_tiny_e2_eval/val_checkpoint_predictions.csv
 outputs/convnext_tiny_e2_eval/val_checkpoint_errors.csv
 outputs/convnext_tiny_e2_eval/submission.csv
 ```
+
+## 2026-06-19 SVTRv2-Inspired FRM-Lite Implementation
+
+Motivation:
+
+- SVTRv2 uses feature rearranging to improve text recognition features.
+- This dataset always contains exactly five character slots, so a full CTC-oriented FRM is unnecessary.
+- I implemented a task-specific fixed-slot feature rearranger instead:
+
+```text
+ConvNeXt feature map [B,C,H,W]
+-> flatten to visual tokens [B,HW,C]
+-> 5 learned slot queries
+-> query-key attention over visual tokens
+-> 5 rearranged slot features [B,5,D]
+-> fuse with pooled slot features when --slot-extractor pool_query
+```
+
+Implementation changes:
+
+- Added `FixedSlotFeatureRearranger` in `src/model.py`.
+- Added `slot_extractor` modes for ConvNeXt:
+  - `pool`: original adaptive pool slots,
+  - `query`: learned query slots only,
+  - `pool_query`: fused pooled and query slots.
+- Added CLI option `--slot-extractor pool|query|pool_query`.
+
+Smoke command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/frm_lite_smoke \
+  --checkpoint-dir checkpoints/frm_lite_smoke \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --feature-dim 64 \
+  --head-hidden-dim 64 \
+  --debug-overfit \
+  --debug-samples 16 \
+  --epochs 1 \
+  --batch-size 4 \
+  --device cuda \
+  --skip-test \
+  --no-tta
+```
+
+Smoke result:
+
+```text
+Model: convnext_tiny pretrained_backbone=on
+slot_extractor=pool_query
+params=28,077,310
+train_loss=4.3033
+debug_train_loss=4.1849
+calibrated_final_exact_acc=0.0625
+char_slot_acc=0.0625
+color_slot_acc=0.6250
+```
+
+Next ablation:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_frm_lite_e2 \
+  --checkpoint-dir checkpoints/convnext_frm_lite_e2 \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 320 \
+  --learning-rate 3e-4 \
+  --epochs 2 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```
