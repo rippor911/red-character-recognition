@@ -116,3 +116,32 @@ baseline_error = 1 - 0.9188 = 0.0812
 target_calibrated_final_exact_acc >= 0.9310
 ```
 
+## 2026-06-19 Pretrained Weight Download
+
+Command:
+
+```bash
+python - <<PY
+from torchvision.models import ConvNeXt_Tiny_Weights, convnext_tiny
+weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1
+model = convnext_tiny(weights=weights)
+PY
+```
+
+Downloaded public pretrained model:
+
+```text
+model=TorchVision ConvNeXt-Tiny
+weights=ConvNeXt_Tiny_Weights.IMAGENET1K_V1
+source_url=https://download.pytorch.org/models/convnext_tiny-983f1562.pth
+cache_file=C:\Users\GJR79\.cache\torch\hub\checkpoints\convnext_tiny-983f1562.pth
+cache_file_size=114,419,221 bytes
+model_params=28,589,128
+license/source=TorchVision official pretrained weights
+```
+
+Use plan:
+
+- Use the pretrained ConvNeXt-Tiny only as a visual feature extractor/fine-tuned backbone.
+- Keep the task-specific five-slot character head and five-slot red-color head.
+- Do not use external task labels or test-set annotations.
