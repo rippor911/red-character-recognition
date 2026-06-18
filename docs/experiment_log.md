@@ -43,3 +43,76 @@ Planned stages:
    - lightweight fixed-slot feature rearrangement.
 5. Record every command, metric, implementation change, and commit.
 
+## 2026-06-19 Baseline CNN E5
+
+Command:
+
+```bash
+python src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/baseline_cnn_e5 \
+  --checkpoint-dir checkpoints/baseline_cnn_e5 \
+  --epochs 5 \
+  --batch-size 128 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Model:
+
+```text
+BaselineCNN
+params=1,909,038
+pretrained_weights=None
+image_size=64x256
+slot_pooling=avgmax
+slot_context=on
+normalization=dataset, per-channel
+TTA shifts=0,-2,2
+TTA scales=1,0.95,1.05
+```
+
+Best validation result:
+
+```text
+epoch=5
+train_loss=0.5209938836
+val_loss=0.1897287615
+final_exact_acc=0.9156
+calibrated_final_exact_acc=0.9188
+char_slot_acc=0.95028
+char_sequence_acc=0.7740
+color_slot_acc=0.99848
+color_pattern_acc=0.9926
+calibrated_color_pattern_acc=0.9942
+calibrated_length_acc=0.9948
+char_oracle_final_exact_acc=0.9948
+color_oracle_final_exact_acc=0.9218
+color_decode_method=threshold
+char_decode_method=argmax
+color_thresholds=0.850,0.750,0.850,0.650,0.900
+```
+
+Artifacts:
+
+```text
+checkpoints/baseline_cnn_e5/baseline_best.pt
+outputs/baseline_cnn_e5/training_history.csv
+outputs/baseline_cnn_e5/val_predictions.csv
+outputs/baseline_cnn_e5/val_errors.csv
+outputs/baseline_cnn_e5/submission.csv
+```
+
+Notes:
+
+- The baseline is already strong; the main remaining bottleneck is character recognition, not red-color detection.
+- `color_slot_acc=0.99848` and `color_pattern_acc=0.9926` show that the color branch is near saturation.
+- `char_slot_acc=0.95028` and `char_sequence_acc=0.7740` leave more room for a pretrained visual backbone.
+- Because baseline exact accuracy is 91.88%, a literal +15 absolute-point gain is impossible without exceeding 100%. I will use "at least 15% relative error reduction" as the practical target:
+
+```text
+baseline_error = 1 - 0.9188 = 0.0812
+15_percent_error_reduction_target = 1 - 0.0812 * 0.85 = 0.93098
+target_calibrated_final_exact_acc >= 0.9310
+```
+
