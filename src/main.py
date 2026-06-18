@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATA_DIR = ROOT / "dataset"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs"
 DEFAULT_CHECKPOINT_DIR = ROOT / "checkpoints"
+NormalizationValue = float | Sequence[float]
 
 
 @dataclass
@@ -326,13 +327,61 @@ def parse_float_sequence(value: str) -> tuple[float, ...]:
     return tuple(deduped) if deduped else (0.0,)
 
 
-def translate_images(images: torch.Tensor, shift_x: int, fill_value: float = 1.0) -> torch.Tensor:
+def normalization_to_tuple(value: object, channels: int = 3) -> tuple[float, ...]:
+    if isinstance(value, torch.Tensor):
+        values = value.detach().cpu().flatten().tolist()
+    elif isinstance(value, np.ndarray):
+        values = value.reshape(-1).astype(float).tolist()
+    elif isinstance(value, (list, tuple)):
+        values = [float(item) for item in value]
+    else:
+        values = [float(value)]
+    if len(values) not in {1, channels}:
+        raise ValueError(f"normalization value must contain 1 or {channels} values, got {len(values)}")
+    return tuple(float(item) for item in values)
+
+
+def normalization_for_storage(value: object) -> float | list[float]:
+    values = normalization_to_tuple(value)
+    return float(values[0]) if len(values) == 1 else [float(item) for item in values]
+
+
+def expand_normalization(value: object, channels: int = 3) -> tuple[float, ...]:
+    values = normalization_to_tuple(value, channels=channels)
+    if len(values) == 1:
+        values = values * channels
+    return values
+
+
+def compute_white_fill_value(mean: object, std: object, channels: int = 3) -> float | list[float]:
+    mean_values = expand_normalization(mean, channels=channels)
+    std_values = expand_normalization(std, channels=channels)
+    fill_values = [
+        (1.0 - mean_value) / max(std_value, 1e-6)
+        for mean_value, std_value in zip(mean_values, std_values)
+    ]
+    return float(fill_values[0]) if len(set(round(item, 8) for item in fill_values)) == 1 else fill_values
+
+
+def format_normalization_value(value: object) -> str:
+    return ",".join(f"{item:.4f}" for item in normalization_to_tuple(value))
+
+
+def make_image_fill(images: torch.Tensor, fill_value: NormalizationValue) -> torch.Tensor:
+    values = normalization_to_tuple(fill_value, channels=images.size(1))
+    if len(values) == 1:
+        return torch.full_like(images, float(values[0]))
+    fill_tensor = torch.tensor(values, dtype=images.dtype, device=images.device).view(1, -1, 1, 1)
+    return fill_tensor.expand_as(images).clone()
+
+
+def translate_images(images: torch.Tensor, shift_x: int, fill_value: NormalizationValue = 1.0) -> torch.Tensor:
     if shift_x == 0:
         return images
     width = images.shape[-1]
     if abs(shift_x) >= width:
-        return torch.full_like(images, fill_value)
-    shifted = torch.full_like(images, fill_value)
+        return make_image_fill(images, fill_value)
+    shifted = make_image_fill(images, fill_value)
     if shift_x > 0:
         src_x0, src_x1 = 0, width - shift_x
         dst_x0, dst_x1 = shift_x, width
@@ -362,7 +411,7 @@ def forward_with_tta(
     images: torch.Tensor,
     tta_shifts: Sequence[int],
     tta_scales: Sequence[float] = (1.0,),
-    fill_value: float = 1.0,
+    fill_value: NormalizationValue = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if len(tta_shifts) <= 1 and len(tta_scales) <= 1:
         return model(images)
@@ -586,7 +635,7 @@ def evaluate(
     threshold_steps: int = 19,
     tta_shifts: Sequence[int] = (0,),
     tta_scales: Sequence[float] = (1.0,),
-    tta_fill_value: float = 1.0,
+    tta_fill_value: NormalizationValue = 1.0,
     char_log_priors: Optional[Sequence[Sequence[float]]] = None,
     char_prior_weights: Sequence[float] = (0.0,),
     count_log_priors: Optional[Sequence[float]] = None,
@@ -1044,17 +1093,17 @@ def compute_dataset_normalization(
     image_size: tuple[int, int],
     max_samples: int,
     seed: int,
-) -> tuple[float, float]:
+) -> tuple[list[float], list[float]]:
     if df.empty:
-        return 0.5, 0.5
+        return [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
     sample_count = len(df) if max_samples <= 0 else min(len(df), max_samples)
     if sample_count < len(df):
         sampled_df = df.sample(n=sample_count, random_state=seed).reset_index(drop=True)
     else:
         sampled_df = df.sort_values("filename").reset_index(drop=True)
 
-    total_sum = 0.0
-    total_sq_sum = 0.0
+    total_sum = torch.zeros(3, dtype=torch.float64)
+    total_sq_sum = torch.zeros(3, dtype=torch.float64)
     total_count = 0
     for filename in sampled_df["filename"].astype(str):
         image = load_image_tensor(
@@ -1064,25 +1113,26 @@ def compute_dataset_normalization(
             normalize_mean=0.0,
             normalize_std=1.0,
         )
-        total_sum += float(image.sum().item())
-        total_sq_sum += float((image * image).sum().item())
-        total_count += int(image.numel())
+        image = image.to(dtype=torch.float64)
+        total_sum += image.sum(dim=(1, 2))
+        total_sq_sum += (image * image).sum(dim=(1, 2))
+        total_count += int(image.shape[1] * image.shape[2])
 
     mean = total_sum / max(1, total_count)
-    variance = max(1e-6, total_sq_sum / max(1, total_count) - mean * mean)
-    std = max(0.05, float(np.sqrt(variance)))
-    return float(mean), std
+    variance = (total_sq_sum / max(1, total_count) - mean * mean).clamp_min(1e-6)
+    std = variance.sqrt().clamp_min(0.05)
+    return mean.tolist(), std.tolist()
 
 
 def resolve_input_normalization(
     config: TrainConfig,
     train_split: pd.DataFrame,
     train_image_dir: Path,
-) -> tuple[float, float, float]:
+) -> tuple[float | list[float], float | list[float], float | list[float]]:
     if config.normalization == "none":
-        mean, std = 0.0, 1.0
+        mean, std = [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
     elif config.normalization == "fixed":
-        mean, std = 0.5, 0.5
+        mean, std = [0.5, 0.5, 0.5], [0.5, 0.5, 0.5]
     else:
         mean, std = compute_dataset_normalization(
             train_split,
@@ -1091,7 +1141,7 @@ def resolve_input_normalization(
             max_samples=config.normalization_samples,
             seed=config.seed,
         )
-    fill_value = (1.0 - mean) / max(std, 1e-6)
+    fill_value = compute_white_fill_value(mean, std)
     return mean, std, fill_value
 
 
@@ -1270,7 +1320,7 @@ def save_validation_diagnostics(
     max_error_samples: int,
     tta_shifts: Sequence[int] = (0,),
     tta_scales: Sequence[float] = (1.0,),
-    tta_fill_value: float = 1.0,
+    tta_fill_value: NormalizationValue = 1.0,
     color_decode_method: str = "threshold",
     char_decode_method: str = "argmax",
     char_log_priors: Sequence[Sequence[float]] = (),
@@ -1495,9 +1545,9 @@ def restore_checkpoint_metadata(
     checkpoint: dict[str, object],
     checkpoint_path: Path,
     config: TrainConfig,
-    fallback_input_mean: float = 0.5,
-    fallback_input_std: float = 0.5,
-    fallback_tta_fill_value: float = 1.0,
+    fallback_input_mean: NormalizationValue = 0.5,
+    fallback_input_std: NormalizationValue = 0.5,
+    fallback_tta_fill_value: NormalizationValue = 1.0,
     fallback_tta_shifts: Sequence[int] = (0,),
     fallback_tta_scales: Sequence[float] = (1.0,),
 ) -> BaselineCNN:
@@ -1527,9 +1577,9 @@ def restore_checkpoint_metadata(
         checkpoint.get("pattern_confidence_weight", metrics.get("pattern_confidence_weight", 0.0))
     )
     model.input_normalization = str(checkpoint.get("input_normalization", config.normalization))
-    model.input_mean = float(checkpoint.get("input_mean", fallback_input_mean))
-    model.input_std = float(checkpoint.get("input_std", fallback_input_std))
-    model.tta_fill_value = float(checkpoint.get("tta_fill_value", fallback_tta_fill_value))
+    model.input_mean = normalization_for_storage(checkpoint.get("input_mean", fallback_input_mean))
+    model.input_std = normalization_for_storage(checkpoint.get("input_std", fallback_input_std))
+    model.tta_fill_value = normalization_for_storage(checkpoint.get("tta_fill_value", fallback_tta_fill_value))
     model.model_source = str(checkpoint.get("model_source", "raw"))
     model.tta_shifts = tuple(int(item) for item in checkpoint.get("tta_shifts", fallback_tta_shifts))
     model.tta_scales = tuple(float(item) for item in checkpoint.get("tta_scales", fallback_tta_scales))
@@ -1599,8 +1649,8 @@ def evaluate_checkpoint_model(
         _, val_split = split_train_val(train_df, val_ratio=config.val_ratio, seed=config.seed)
         eval_name = "val"
 
-    input_mean = float(getattr(model, "input_mean", 0.5))
-    input_std = float(getattr(model, "input_std", 0.5))
+    input_mean = normalization_for_storage(getattr(model, "input_mean", 0.5))
+    input_std = normalization_for_storage(getattr(model, "input_std", 0.5))
     val_dataset = RedCharacterTrainDataset(
         val_split,
         train_image_dir,
@@ -1619,7 +1669,9 @@ def evaluate_checkpoint_model(
 
     eval_tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts)) if config.use_tta else (0,)
     eval_tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales)) if config.use_tta else (1.0,)
-    tta_fill_value = float(getattr(model, "tta_fill_value", (1.0 - input_mean) / max(input_std, 1e-6)))
+    tta_fill_value = normalization_for_storage(
+        getattr(model, "tta_fill_value", compute_white_fill_value(input_mean, input_std))
+    )
     char_log_priors = (
         tuple(tuple(float(value) for value in row) for row in getattr(model, "char_log_priors", ()))
         if config.use_char_prior
@@ -1804,9 +1856,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         use_slot_context=config.use_slot_context,
     ).to(device)
     model.image_size = config.image_size
-    model.input_mean = float(input_mean)
-    model.input_std = float(input_std)
-    model.tta_fill_value = float(tta_fill_value)
+    model.input_mean = normalization_for_storage(input_mean)
+    model.input_std = normalization_for_storage(input_std)
+    model.tta_fill_value = normalization_for_storage(tta_fill_value)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = (
         build_scheduler(optimizer, epochs=config.epochs, warmup_epochs=config.warmup_epochs)
@@ -1829,7 +1881,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     print(f"Train samples: {len(train_dataset)} | {eval_name} samples: {len(val_dataset)}")
     print(
         f"Input normalization: {config.normalization} "
-        f"mean={input_mean:.4f} std={input_std:.4f} white_fill={tta_fill_value:.4f}"
+        f"mean={format_normalization_value(input_mean)} "
+        f"std={format_normalization_value(input_std)} "
+        f"white_fill={format_normalization_value(tta_fill_value)}"
     )
     print(f"Train augmentation: {'on' if train_augment else 'off'} | AMP: {'on' if use_amp else 'off'}")
     print(
@@ -2109,8 +2163,8 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     device = next(model.parameters()).device
     image_size = getattr(model, "image_size", config.image_size)
     has_input_normalization = hasattr(model, "input_mean") and hasattr(model, "input_std")
-    input_mean = float(getattr(model, "input_mean", 0.5))
-    input_std = float(getattr(model, "input_std", 0.5))
+    input_mean = normalization_for_storage(getattr(model, "input_mean", 0.5))
+    input_std = normalization_for_storage(getattr(model, "input_std", 0.5))
     input_normalization = str(getattr(model, "input_normalization", "fixed" if not has_input_normalization else config.normalization))
     test_dataset = RedCharacterTestDataset(
         test_df,
@@ -2143,7 +2197,9 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     pattern_confidence_weight = float(getattr(model, "pattern_confidence_weight", 0.0))
     tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts)) if config.use_tta else (0,)
     tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales)) if config.use_tta else (1.0,)
-    tta_fill_value = float(getattr(model, "tta_fill_value", (1.0 - input_mean) / max(input_std, 1e-6)))
+    tta_fill_value = normalization_for_storage(
+        getattr(model, "tta_fill_value", compute_white_fill_value(input_mean, input_std))
+    )
     use_pattern_prior = color_decode_method in {"pattern_prior", "pattern_confidence"} and bool(color_pattern_candidates)
     use_count_prior = color_decode_method == "count_prior" and bool(count_log_priors)
     if use_pattern_prior:
@@ -2162,7 +2218,8 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
         print("Using argmax character decoding for test decoding")
     print(
         f"Using input normalization {input_normalization} "
-        f"(mean={input_mean:.4f}, std={input_std:.4f}) for test decoding"
+        f"(mean={format_normalization_value(input_mean)}, "
+        f"std={format_normalization_value(input_std)}) for test decoding"
     )
     print(f"Using TTA shifts {','.join(str(item) for item in tta_shifts)} for test decoding")
     print(f"Using TTA scales {','.join(f'{item:g}' for item in tta_scales)} for test decoding")
