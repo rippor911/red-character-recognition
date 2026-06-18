@@ -209,3 +209,88 @@ python -u src/main.py \
   --num-workers 2 \
   --device cuda
 ```
+
+## 2026-06-19 ConvNeXt-Tiny Pretrained E2 Early Stop
+
+Training command actually used:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_tiny_e5 \
+  --checkpoint-dir checkpoints/convnext_tiny_e5 \
+  --model convnext_tiny \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 320 \
+  --learning-rate 3e-4 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Note: this command missed `--epochs 5`, so it started with the default 20 epochs. It was manually early-stopped after epoch 2 because the validation target had already been exceeded.
+
+Checkpoint evaluation command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_tiny_e2_eval \
+  --checkpoint-path checkpoints/convnext_tiny_e5/baseline_best.pt \
+  --eval-checkpoint \
+  --expected-test-rows 5000 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Best validation result:
+
+```text
+epoch=2
+selected_model=ema
+val_loss=0.1143
+final_exact_acc=0.9528
+calibrated_final_exact_acc=0.9578
+char_slot_acc=0.9820
+char_sequence_acc=0.9138
+color_slot_acc=0.9976
+color_pattern_acc=0.9882
+calibrated_color_pattern_acc=0.9922
+calibrated_length_acc=0.9928
+char_oracle_final_exact_acc=0.9928
+color_oracle_final_exact_acc=0.9642
+color_decode_method=threshold
+char_decode_method=argmax
+color_thresholds=0.950,0.850,0.950,0.950,0.950
+```
+
+Improvement over CNN baseline:
+
+```text
+baseline_calibrated_final_exact_acc=0.9188
+convnext_calibrated_final_exact_acc=0.9578
+absolute_gain=+0.0390
+baseline_error=0.0812
+convnext_error=0.0422
+relative_error_reduction=(0.0812 - 0.0422) / 0.0812 = 48.0%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Takeaways:
+
+- The pretrained visual backbone is the strongest gain so far.
+- The color branch is no longer the bottleneck; exact accuracy is mostly limited by remaining character mistakes.
+- This is a clean report point: public ImageNet pretrained backbone + task-specific five-slot heads.
+
+Artifacts:
+
+```text
+checkpoints/convnext_tiny_e5/baseline_best.pt
+outputs/convnext_tiny_e2_eval/val_checkpoint_metrics.csv
+outputs/convnext_tiny_e2_eval/val_checkpoint_predictions.csv
+outputs/convnext_tiny_e2_eval/val_checkpoint_errors.csv
+outputs/convnext_tiny_e2_eval/submission.csv
+```
