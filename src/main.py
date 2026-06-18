@@ -44,6 +44,8 @@ class TrainConfig:
     weight_decay: float = 1e-4
     label_smoothing: float = 0.03
     char_loss_weight: float = 1.0
+    use_char_class_weight: bool = True
+    max_char_class_weight: float = 3.0
     color_loss_weight: float = 1.0
     use_color_class_weight: bool = True
     max_color_class_weight: float = 3.0
@@ -87,6 +89,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--label-smoothing", type=float, default=0.03)
     parser.add_argument("--char-loss-weight", type=float, default=1.0)
+    parser.add_argument("--no-char-class-weight", action="store_true")
+    parser.add_argument("--max-char-class-weight", type=float, default=3.0)
     parser.add_argument("--color-loss-weight", type=float, default=1.0)
     parser.add_argument("--no-color-class-weight", action="store_true")
     parser.add_argument("--max-color-class-weight", type=float, default=3.0)
@@ -127,6 +131,8 @@ def parse_args() -> TrainConfig:
         weight_decay=args.weight_decay,
         label_smoothing=args.label_smoothing,
         char_loss_weight=args.char_loss_weight,
+        use_char_class_weight=not args.no_char_class_weight,
+        max_char_class_weight=args.max_char_class_weight,
         color_loss_weight=args.color_loss_weight,
         use_color_class_weight=not args.no_color_class_weight,
         max_color_class_weight=args.max_color_class_weight,
@@ -328,12 +334,14 @@ def compute_loss(
     label_smoothing: float = 0.0,
     char_loss_weight: float = 1.0,
     color_loss_weight: float = 1.0,
+    char_class_weights: Optional[torch.Tensor] = None,
     color_class_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     char_loss = F.cross_entropy(
         char_logits.reshape(-1, len(CHARSET)),
         char_target.reshape(-1),
         label_smoothing=label_smoothing,
+        weight=char_class_weights,
     )
     color_loss = F.cross_entropy(
         color_logits.reshape(-1, 2),
@@ -356,6 +364,7 @@ def train_one_epoch(
     color_loss_weight: float,
     max_grad_norm: float,
     ema: Optional[ModelEMA] = None,
+    char_class_weights: Optional[torch.Tensor] = None,
     color_class_weights: Optional[torch.Tensor] = None,
 ) -> dict[str, float]:
     model.train()
@@ -379,6 +388,7 @@ def train_one_epoch(
                 label_smoothing=label_smoothing,
                 char_loss_weight=char_loss_weight,
                 color_loss_weight=color_loss_weight,
+                char_class_weights=char_class_weights,
                 color_class_weights=color_class_weights,
             )
         if scaler.is_enabled():
@@ -549,6 +559,26 @@ def compute_color_class_weights(
     return weights.to(device)
 
 
+def compute_char_class_weights(
+    df: pd.DataFrame,
+    device: torch.device,
+    max_weight: float,
+) -> torch.Tensor:
+    char_to_idx = {char: idx for idx, char in enumerate(CHARSET)}
+    counts = torch.zeros(len(CHARSET), dtype=torch.float32)
+    for label in df["all_label"].astype(str):
+        for char in label.strip().upper():
+            if char in char_to_idx:
+                counts[char_to_idx[char]] += 1
+    if torch.any(counts <= 0):
+        return torch.ones(len(CHARSET), dtype=torch.float32, device=device)
+    weights = counts.sum() / (len(CHARSET) * counts)
+    if max_weight > 0:
+        weights = torch.clamp(weights, max=max_weight)
+    weights = weights / weights.mean()
+    return weights.to(device)
+
+
 def char_indices_to_string(indices: list[int]) -> str:
     return "".join(CHARSET[int(index)] for index in indices)
 
@@ -664,6 +694,13 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         eval_name = "val"
 
     train_augment = config.use_augmentation and not config.debug_overfit
+    char_class_weights = None
+    if config.use_char_class_weight and not config.debug_overfit:
+        char_class_weights = compute_char_class_weights(
+            train_split,
+            device=device,
+            max_weight=config.max_char_class_weight,
+        )
     color_class_weights = None
     if config.use_color_class_weight and not config.debug_overfit:
         color_class_weights = compute_color_class_weights(
@@ -723,6 +760,16 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     else:
         color_weights = color_class_weights.detach().cpu().tolist()
         print(f"Color class weights: u={color_weights[0]:.4f} r={color_weights[1]:.4f}")
+    if char_class_weights is None:
+        print("Char class weights: off")
+    else:
+        char_weights = char_class_weights.detach().cpu()
+        print(
+            "Char class weights: "
+            f"min={char_weights.min().item():.4f} "
+            f"max={char_weights.max().item():.4f} "
+            f"mean={char_weights.mean().item():.4f}"
+        )
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
     print(f"Model parameters: {count_parameters(model):,}")
@@ -741,6 +788,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             color_loss_weight=config.color_loss_weight,
             max_grad_norm=config.max_grad_norm,
             ema=ema,
+            char_class_weights=char_class_weights,
             color_class_weights=color_class_weights,
         )
         raw_eval_metrics = evaluate(
@@ -827,6 +875,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "model_source": eval_source,
                     "ema_decay": config.ema_decay if ema is not None else None,
                     "tta_shifts": list(eval_tta_shifts),
+                    "char_class_weights": (
+                        char_class_weights.detach().cpu().tolist()
+                        if char_class_weights is not None
+                        else None
+                    ),
                     "color_class_weights": (
                         color_class_weights.detach().cpu().tolist()
                         if color_class_weights is not None
