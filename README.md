@@ -43,6 +43,14 @@ r -> 1
 python src/main.py
 ```
 
+使用已经保存的最佳 checkpoint 直接生成提交文件：
+
+```bash
+python src/main.py --predict-only --checkpoint-path checkpoints/baseline_best.pt
+```
+
+如果省略 `--checkpoint-path`，`--predict-only` 会默认读取 `--checkpoint-dir` 下的 `baseline_best.pt`。
+
 默认参数：
 
 ```text

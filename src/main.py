@@ -43,6 +43,7 @@ class TrainConfig:
     data_dir: Path = field(default_factory=lambda: DEFAULT_DATA_DIR)
     output_dir: Path = field(default_factory=lambda: DEFAULT_OUTPUT_DIR)
     checkpoint_dir: Path = field(default_factory=lambda: DEFAULT_CHECKPOINT_DIR)
+    checkpoint_path: Optional[Path] = None
     image_size: tuple[int, int] = (64, 256)
     batch_size: int = 64
     epochs: int = 20
@@ -92,6 +93,7 @@ class TrainConfig:
     device: str = "auto"
     debug_overfit: bool = False
     debug_samples: int = 128
+    predict_only: bool = False
     skip_test: bool = False
     expected_test_rows: Optional[int] = 5000
 
@@ -101,6 +103,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
+    parser.add_argument("--checkpoint-path", type=Path, default=None)
     parser.add_argument("--image-height", type=int, default=64)
     parser.add_argument("--image-width", type=int, default=256)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -151,6 +154,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     parser.add_argument("--debug-overfit", action="store_true")
     parser.add_argument("--debug-samples", type=int, default=128)
+    parser.add_argument("--predict-only", action="store_true")
     parser.add_argument("--skip-test", action="store_true")
     parser.add_argument("--expected-test-rows", type=int, default=5000)
     args = parser.parse_args()
@@ -158,6 +162,7 @@ def parse_args() -> TrainConfig:
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         checkpoint_dir=args.checkpoint_dir,
+        checkpoint_path=args.checkpoint_path,
         image_size=(args.image_height, args.image_width),
         batch_size=args.batch_size,
         epochs=args.epochs,
@@ -207,6 +212,7 @@ def parse_args() -> TrainConfig:
         device=args.device,
         debug_overfit=args.debug_overfit,
         debug_samples=args.debug_samples,
+        predict_only=args.predict_only,
         skip_test=args.skip_test,
         expected_test_rows=args.expected_test_rows,
     )
@@ -1470,6 +1476,109 @@ def load_checkpoint(path: Path, device: torch.device) -> dict[str, object]:
         return torch.load(path, map_location=device)
 
 
+def resolve_checkpoint_path(config: TrainConfig) -> Path:
+    return config.checkpoint_path or (config.checkpoint_dir / "baseline_best.pt")
+
+
+def checkpoint_image_size(checkpoint: dict[str, object], fallback: tuple[int, int]) -> tuple[int, int]:
+    value = checkpoint.get("image_size", fallback)
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return int(value[0]), int(value[1])
+    return fallback
+
+
+def restore_checkpoint_metadata(
+    model: BaselineCNN,
+    checkpoint: dict[str, object],
+    checkpoint_path: Path,
+    config: TrainConfig,
+    fallback_input_mean: float = 0.5,
+    fallback_input_std: float = 0.5,
+    fallback_tta_fill_value: float = 1.0,
+    fallback_tta_shifts: Sequence[int] = (0,),
+    fallback_tta_scales: Sequence[float] = (1.0,),
+) -> BaselineCNN:
+    metrics = checkpoint.get("metrics", {})
+    if not isinstance(metrics, dict):
+        metrics = {}
+
+    model.best_checkpoint_path = checkpoint_path
+    model.best_metrics = metrics
+    model.image_size = checkpoint_image_size(checkpoint, config.image_size)
+    model.color_threshold = float(checkpoint.get("color_threshold", metrics.get("color_threshold", 0.5)))
+    color_thresholds = checkpoint.get(
+        "color_thresholds",
+        metrics.get("color_thresholds", threshold_to_list(model.color_threshold)),
+    )
+    model.color_thresholds = tuple(float(value) for value in threshold_to_list(color_thresholds))
+    model.color_decode_method = str(checkpoint.get("color_decode_method", metrics.get("color_decode_method", "threshold")))
+    model.char_decode_method = str(checkpoint.get("char_decode_method", metrics.get("char_decode_method", "argmax")))
+    model.char_log_priors = tuple(tuple(float(value) for value in row) for row in checkpoint.get("char_log_priors", ()))
+    model.char_prior_weight = float(checkpoint.get("char_prior_weight", metrics.get("char_prior_weight", 0.0)))
+    model.count_log_priors = tuple(float(value) for value in checkpoint.get("count_log_priors", ()))
+    model.count_prior_weight = float(checkpoint.get("count_prior_weight", metrics.get("count_prior_weight", 0.0)))
+    model.color_pattern_candidates = tuple(checkpoint.get("color_pattern_candidates", ()))
+    model.color_pattern_log_priors = tuple(float(item) for item in checkpoint.get("color_pattern_log_priors", ()))
+    model.pattern_prior_weight = float(checkpoint.get("pattern_prior_weight", metrics.get("pattern_prior_weight", 0.0)))
+    model.pattern_confidence_weight = float(
+        checkpoint.get("pattern_confidence_weight", metrics.get("pattern_confidence_weight", 0.0))
+    )
+    model.input_normalization = str(checkpoint.get("input_normalization", config.normalization))
+    model.input_mean = float(checkpoint.get("input_mean", fallback_input_mean))
+    model.input_std = float(checkpoint.get("input_std", fallback_input_std))
+    model.tta_fill_value = float(checkpoint.get("tta_fill_value", fallback_tta_fill_value))
+    model.model_source = str(checkpoint.get("model_source", "raw"))
+    model.tta_shifts = tuple(int(item) for item in checkpoint.get("tta_shifts", fallback_tta_shifts))
+    model.tta_scales = tuple(float(item) for item in checkpoint.get("tta_scales", fallback_tta_scales))
+    return model
+
+
+def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None) -> BaselineCNN:
+    config = config or TrainConfig()
+    device = resolve_device(config.device)
+    checkpoint_path = Path(path)
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    checkpoint = load_checkpoint(checkpoint_path, device)
+    charset = checkpoint.get("charset", CHARSET)
+    if charset != CHARSET:
+        raise ValueError(f"Checkpoint charset {charset!r} does not match expected charset {CHARSET!r}")
+
+    model_config = checkpoint.get("model_config", {})
+    if not isinstance(model_config, dict):
+        raise ValueError("Checkpoint field 'model_config' must be a dictionary")
+
+    model = BaselineCNN(
+        num_chars=int(model_config.get("num_chars", len(CHARSET))),
+        feature_dim=int(model_config.get("feature_dim", config.feature_dim)),
+        dropout=float(model_config.get("dropout", config.dropout)),
+        head_hidden_dim=int(model_config.get("head_hidden_dim", config.head_hidden_dim)),
+        position_specific_heads=bool(model_config.get("position_specific_heads", config.position_specific_heads)),
+        slot_pooling=str(model_config.get("slot_pooling", "avg")),
+        use_slot_context=bool(model_config.get("use_slot_context", False)),
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
+    restore_checkpoint_metadata(
+        model=model,
+        checkpoint=checkpoint,
+        checkpoint_path=checkpoint_path,
+        config=config,
+        fallback_input_mean=0.5,
+        fallback_input_std=0.5,
+        fallback_tta_fill_value=1.0,
+        fallback_tta_shifts=config.tta_shifts if config.use_tta else (0,),
+        fallback_tta_scales=config.tta_scales if config.use_tta else (1.0,),
+    )
+    print(f"Loaded checkpoint from {checkpoint_path}")
+    metrics = getattr(model, "best_metrics", {})
+    if metrics:
+        metric = metrics.get("calibrated_final_exact_acc", metrics.get("final_exact_acc"))
+        if metric is not None:
+            print(f"Checkpoint validation calibrated_final_exact_acc={float(metric):.4f}")
+    return model
+
+
 def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> BaselineCNN:
     config = config or TrainConfig()
     set_seed(config.seed)
@@ -1825,34 +1934,17 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
 
     checkpoint = load_checkpoint(best_path, device)
     model.load_state_dict(checkpoint["model_state_dict"])
-    model.best_checkpoint_path = best_path
-    model.best_metrics = checkpoint.get("metrics", {})
-    model.color_threshold = float(checkpoint.get("color_threshold", model.best_metrics.get("color_threshold", 0.5)))
-    model.color_thresholds = tuple(
-        checkpoint.get(
-            "color_thresholds",
-            model.best_metrics.get("color_thresholds", threshold_to_list(model.color_threshold)),
-        )
+    restore_checkpoint_metadata(
+        model=model,
+        checkpoint=checkpoint,
+        checkpoint_path=best_path,
+        config=config,
+        fallback_input_mean=input_mean,
+        fallback_input_std=input_std,
+        fallback_tta_fill_value=tta_fill_value,
+        fallback_tta_shifts=eval_tta_shifts,
+        fallback_tta_scales=eval_tta_scales,
     )
-    model.color_decode_method = str(checkpoint.get("color_decode_method", model.best_metrics.get("color_decode_method", "threshold")))
-    model.char_decode_method = str(checkpoint.get("char_decode_method", model.best_metrics.get("char_decode_method", "argmax")))
-    model.char_log_priors = tuple(tuple(float(value) for value in row) for row in checkpoint.get("char_log_priors", ()))
-    model.char_prior_weight = float(checkpoint.get("char_prior_weight", model.best_metrics.get("char_prior_weight", 0.0)))
-    model.count_log_priors = tuple(float(value) for value in checkpoint.get("count_log_priors", ()))
-    model.count_prior_weight = float(checkpoint.get("count_prior_weight", model.best_metrics.get("count_prior_weight", 0.0)))
-    model.color_pattern_candidates = tuple(checkpoint.get("color_pattern_candidates", ()))
-    model.color_pattern_log_priors = tuple(float(item) for item in checkpoint.get("color_pattern_log_priors", ()))
-    model.pattern_prior_weight = float(checkpoint.get("pattern_prior_weight", model.best_metrics.get("pattern_prior_weight", 0.0)))
-    model.pattern_confidence_weight = float(
-        checkpoint.get("pattern_confidence_weight", model.best_metrics.get("pattern_confidence_weight", 0.0))
-    )
-    model.input_normalization = str(checkpoint.get("input_normalization", config.normalization))
-    model.input_mean = float(checkpoint.get("input_mean", input_mean))
-    model.input_std = float(checkpoint.get("input_std", input_std))
-    model.tta_fill_value = float(checkpoint.get("tta_fill_value", tta_fill_value))
-    model.model_source = str(checkpoint.get("model_source", "raw"))
-    model.tta_shifts = tuple(checkpoint.get("tta_shifts", eval_tta_shifts))
-    model.tta_scales = tuple(checkpoint.get("tta_scales", eval_tta_scales))
     if config.save_val_diagnostics:
         save_validation_diagnostics(
             model=model,
@@ -2012,6 +2104,16 @@ def save_submission(
 
 def main():
     config = parse_args()
+    if config.predict_only:
+        model = load_model_from_checkpoint(resolve_checkpoint_path(config), config)
+        if config.skip_test:
+            print("Loaded checkpoint and skipped test inference by request.")
+            return
+        test_df = load_test_data(config.data_dir)
+        predictions = predict_test(model, test_df, config)
+        save_submission(test_df, predictions, config)
+        return
+
     train_df = load_train_data(config.data_dir)
     model = train_model(train_df, config)
     if config.skip_test:
