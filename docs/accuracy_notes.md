@@ -38,7 +38,7 @@ stretch target: final_exact_acc 接近 0.98-0.99
 
 1. 更稳的轻量 CNN：使用 depthwise separable block、slot pooling、slot 位置嵌入和 MLP 分类头；默认 `feature_dim/head_hidden_dim=384`，并为 5 个位置使用位置专用分类头，整体仍保持约 146 万参数的轻量规模。
 2. 颜色专用统计分支：每个 slot 额外提取 RGB 均值以及 `red - max(green, blue)` 的均值/最大值，降低颜色判定对深层字符特征的依赖。
-3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、按位置统计的字符/颜色类别权重、按颜色模式均衡采样、warmup+cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性 TTA。
+3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、按位置统计的字符/颜色类别权重、按颜色模式均衡采样、warmup+cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性位移+尺度 TTA。
 4. 验证集阈值校准：保留原始 `final_exact_acc`，同时在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，记录 `threshold_final_exact_acc` 和 `color_thresholds`。
 5. 训练集颜色模式先验：只用训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，记录 `pattern_final_exact_acc`；最终 checkpoint 按 `calibrated_final_exact_acc` 选择阈值解码或模式先验解码，不读取或人工修改测试标签。
 
@@ -68,4 +68,4 @@ outputs/val_errors.csv
 6. 如果低频颜色模式表现差，保留默认均衡采样；如果高频颜色模式被明显拉低，可用 `--no-balanced-sampler` 做对照。
 7. 如果训练集小样本能记住但验证集不上升，优先减弱增强、调高 dropout/weight decay 或检查 train/val 分布。
 8. 如果 `training_history.csv` 中 `val_ema_calibrated_final_exact_acc` 高于 `val_raw_calibrated_final_exact_acc`，说明 EMA 更稳；如果 raw 长期更高，可以临时加 `--no-ema` 做对照实验。
-9. 如果验证/测试图像存在轻微水平偏移，默认 TTA 会平均 `0,-2,2` 三个水平平移视图；如果发现 TTA 变慢或无收益，可加 `--no-tta` 或调整 `--tta-shifts` 做对照。
+9. 如果验证/测试图像存在轻微水平偏移或缩放差异，默认 TTA 会平均 `0,-2,2` 三个位移和 `1,0.95,1.05` 三个尺度；如果发现 TTA 变慢或无收益，可加 `--no-tta`、`--tta-scales 1` 或调整 `--tta-shifts` 做对照。

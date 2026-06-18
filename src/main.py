@@ -65,6 +65,7 @@ class TrainConfig:
     ema_decay: float = 0.999
     use_tta: bool = True
     tta_shifts: tuple[int, ...] = (0, -2, 2)
+    tta_scales: tuple[float, ...] = (1.0, 0.95, 1.05)
     threshold_min: float = 0.05
     threshold_max: float = 0.95
     threshold_steps: int = 19
@@ -114,6 +115,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--ema-decay", type=float, default=0.999)
     parser.add_argument("--no-tta", action="store_true")
     parser.add_argument("--tta-shifts", type=str, default="0,-2,2")
+    parser.add_argument("--tta-scales", type=str, default="1,0.95,1.05")
     parser.add_argument("--threshold-min", type=float, default=0.05)
     parser.add_argument("--threshold-max", type=float, default=0.95)
     parser.add_argument("--threshold-steps", type=int, default=19)
@@ -160,6 +162,7 @@ def parse_args() -> TrainConfig:
         ema_decay=args.ema_decay,
         use_tta=not args.no_tta,
         tta_shifts=parse_tta_shifts(args.tta_shifts),
+        tta_scales=parse_tta_scales(args.tta_scales),
         threshold_min=args.threshold_min,
         threshold_max=args.threshold_max,
         threshold_steps=args.threshold_steps,
@@ -251,6 +254,25 @@ def parse_tta_shifts(value: str) -> tuple[int, ...]:
     return tuple(deduped) if deduped else (0,)
 
 
+def parse_tta_scales(value: str) -> tuple[float, ...]:
+    scales: list[float] = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        scale = float(item)
+        if scale <= 0:
+            raise ValueError("tta scale values must be positive")
+        scales.append(scale)
+    if 1.0 not in scales:
+        scales.insert(0, 1.0)
+    deduped: list[float] = []
+    for scale in scales:
+        if scale not in deduped:
+            deduped.append(scale)
+    return tuple(deduped) if deduped else (1.0,)
+
+
 def parse_float_sequence(value: str) -> tuple[float, ...]:
     values: list[float] = []
     for item in value.split(","):
@@ -282,25 +304,43 @@ def translate_images(images: torch.Tensor, shift_x: int, fill_value: float = 1.0
     return shifted
 
 
+def scale_images(images: torch.Tensor, scale: float) -> torch.Tensor:
+    if abs(float(scale) - 1.0) < 1e-6:
+        return images
+    height, width = images.shape[-2:]
+    target_height = max(8, int(round(height * float(scale))))
+    target_width = max(8, int(round(width * float(scale))))
+    return F.interpolate(
+        images,
+        size=(target_height, target_width),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+
 def forward_with_tta(
     model: nn.Module,
     images: torch.Tensor,
     tta_shifts: Sequence[int],
+    tta_scales: Sequence[float] = (1.0,),
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if len(tta_shifts) <= 1:
+    if len(tta_shifts) <= 1 and len(tta_scales) <= 1:
         return model(images)
 
     char_sum: Optional[torch.Tensor] = None
     color_sum: Optional[torch.Tensor] = None
-    for shift_x in tta_shifts:
-        view = translate_images(images, shift_x=shift_x)
-        char_logits, color_logits = model(view)
-        char_sum = char_logits if char_sum is None else char_sum + char_logits
-        color_sum = color_logits if color_sum is None else color_sum + color_logits
+    view_count = 0
+    for scale in tta_scales:
+        scaled_images = scale_images(images, scale)
+        for shift_x in tta_shifts:
+            view = translate_images(scaled_images, shift_x=shift_x)
+            char_logits, color_logits = model(view)
+            char_sum = char_logits if char_sum is None else char_sum + char_logits
+            color_sum = color_logits if color_sum is None else color_sum + color_logits
+            view_count += 1
 
     assert char_sum is not None and color_sum is not None
-    scale = float(len(tta_shifts))
-    return char_sum / scale, color_sum / scale
+    return char_sum / float(view_count), color_sum / float(view_count)
 
 
 class ModelEMA:
@@ -505,6 +545,7 @@ def evaluate(
     threshold_max: float = 0.95,
     threshold_steps: int = 19,
     tta_shifts: Sequence[int] = (0,),
+    tta_scales: Sequence[float] = (1.0,),
     pattern_candidates: Optional[Sequence[str]] = None,
     pattern_log_priors: Optional[Sequence[float]] = None,
     pattern_prior_weights: Sequence[float] = (0.0,),
@@ -532,7 +573,7 @@ def evaluate(
         images = batch["image"].to(device)
         char_target = batch["char_target"].to(device)
         color_target = batch["color_target"].to(device)
-        char_logits, color_logits = forward_with_tta(model, images, tta_shifts)
+        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
         loss, char_loss, color_loss = compute_loss(char_logits, color_logits, char_target, color_target)
 
         pred_chars = char_logits.argmax(dim=-1)
@@ -924,6 +965,7 @@ def save_validation_diagnostics(
     color_threshold: float | Sequence[float],
     max_error_samples: int,
     tta_shifts: Sequence[int] = (0,),
+    tta_scales: Sequence[float] = (1.0,),
     color_decode_method: str = "threshold",
     color_pattern_candidates: Sequence[str] = (),
     color_pattern_log_priors: Sequence[float] = (),
@@ -939,7 +981,7 @@ def save_validation_diagnostics(
         color_target = batch["color_target"].to(device)
         filenames = list(batch["filename"])
 
-        char_logits, color_logits = forward_with_tta(model, images, tta_shifts)
+        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
         pred_chars = char_logits.argmax(dim=-1)
         pred_colors = color_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
@@ -1108,6 +1150,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     train_label_smoothing = 0.0 if config.debug_overfit else config.label_smoothing
     train_scheduler_enabled = config.use_scheduler and not config.debug_overfit
     eval_tta_shifts = config.tta_shifts if config.use_tta and not config.debug_overfit else (0,)
+    eval_tta_scales = config.tta_scales if config.use_tta and not config.debug_overfit else (1.0,)
 
     model = BaselineCNN(
         num_chars=len(CHARSET),
@@ -1155,6 +1198,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
+    print(f"TTA scales: {','.join(f'{item:g}' for item in eval_tta_scales)}")
     if train_sampler is None:
         print("Balanced sampler: off")
     else:
@@ -1195,6 +1239,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             threshold_max=config.threshold_max,
             threshold_steps=config.threshold_steps,
             tta_shifts=eval_tta_shifts,
+            tta_scales=eval_tta_scales,
             pattern_candidates=pattern_candidates,
             pattern_log_priors=pattern_log_priors,
             pattern_prior_weights=config.pattern_prior_weights,
@@ -1212,6 +1257,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     threshold_max=config.threshold_max,
                     threshold_steps=config.threshold_steps,
                     tta_shifts=eval_tta_shifts,
+                    tta_scales=eval_tta_scales,
                     pattern_candidates=pattern_candidates,
                     pattern_log_priors=pattern_log_priors,
                     pattern_prior_weights=config.pattern_prior_weights,
@@ -1290,6 +1336,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "scheduler": "warmup+cosine" if scheduler is not None else None,
                     "warmup_epochs": config.warmup_epochs if scheduler is not None else 0,
                     "tta_shifts": list(eval_tta_shifts),
+                    "tta_scales": list(eval_tta_scales),
                     "balanced_sampler": balanced_sampler_enabled,
                     "char_class_weights": (
                         char_class_weights.detach().cpu().tolist()
@@ -1330,6 +1377,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.pattern_prior_weight = float(checkpoint.get("pattern_prior_weight", model.best_metrics.get("pattern_prior_weight", 0.0)))
     model.model_source = str(checkpoint.get("model_source", "raw"))
     model.tta_shifts = tuple(checkpoint.get("tta_shifts", eval_tta_shifts))
+    model.tta_scales = tuple(checkpoint.get("tta_scales", eval_tta_scales))
     if config.save_val_diagnostics:
         save_validation_diagnostics(
             model=model,
@@ -1340,6 +1388,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             color_threshold=model.color_thresholds,
             max_error_samples=config.max_error_samples,
             tta_shifts=model.tta_shifts,
+            tta_scales=model.tta_scales,
             color_decode_method=model.color_decode_method,
             color_pattern_candidates=model.color_pattern_candidates,
             color_pattern_log_priors=model.color_pattern_log_priors,
@@ -1371,6 +1420,7 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     color_pattern_log_priors = tuple(getattr(model, "color_pattern_log_priors", ()))
     pattern_prior_weight = float(getattr(model, "pattern_prior_weight", 0.0))
     tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts if config.use_tta else (0,)))
+    tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales if config.use_tta else (1.0,)))
     use_pattern_prior = color_decode_method == "pattern_prior" and bool(color_pattern_candidates)
     if use_pattern_prior:
         print(
@@ -1380,9 +1430,10 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     else:
         print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
     print(f"Using TTA shifts {','.join(str(item) for item in tta_shifts)} for test decoding")
+    print(f"Using TTA scales {','.join(f'{item:g}' for item in tta_scales)} for test decoding")
     for batch in test_loader:
         images = batch["image"].to(device)
-        char_logits, color_logits = forward_with_tta(model, images, tta_shifts)
+        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
         pred_chars = char_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         if use_pattern_prior:

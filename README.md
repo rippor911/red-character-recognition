@@ -70,6 +70,7 @@ ema=on
 ema_decay=0.999
 tta=on
 tta_shifts=0,-2,2
+tta_scales=1,0.95,1.05
 balanced_sampler=on, by color pattern
 ```
 
@@ -132,7 +133,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。训练 loader 默认按 `color` 模式做均衡采样，可加 `--no-balanced-sampler` 关闭。验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验、均衡采样和数据增强，便于检查小样本记忆能力。
+正式训练默认对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。训练 loader 默认按 `color` 模式做均衡采样，可加 `--no-balanced-sampler` 关闭。验证和测试默认使用确定性位移+尺度 TTA，平均 `0,-2,2` 三个位移和 `1,0.95,1.05` 三个尺度的 logits；若需要更快可设 `--tta-scales 1` 或 `--no-tta`。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验、均衡采样和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -219,16 +220,18 @@ Color class weights: per-slot shape=(5, 2) min=0.3636 max=1.6364 mean=1.0000 r_b
 Char class weights: per-slot shape=(5, 36) min=0.3770 max=1.1429 mean=1.0000
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
+TTA scales: 1,0.95,1.05
 Balanced sampler: on color_patterns=rruuu:3, ururu:3, ruruu:1, uurru:1, uuurr:1
 Color pattern prior: on candidates=5 weights=0,0.25,0.5,1,1.5,2 top=rruuu:0.286, ururu:0.286, ruruu:0.143, uurru:0.143, uuurr:0.143
 Model parameters: 1,462,062
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3416 val_loss=4.0479 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3416 val_loss=4.0800 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
 Saved val_errors.csv
 Using color thresholds 0.500,0.500,0.500,0.500,0.500 for test decoding
 Using TTA shifts 0,-2,2 for test decoding
+Using TTA scales 1,0.95,1.05 for test decoding
 Saved submission.csv
 ```
 
@@ -249,6 +252,7 @@ Color class weights: off
 Char class weights: off
 EMA: off
 TTA shifts: 0
+TTA scales: 1
 Balanced sampler: off
 Color pattern prior: off
 Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1606 debug_train_loss=3.7730 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.1000 color_slot_acc=0.9000 color_pattern_acc=0.5000 calibrated_gain=0.0000
