@@ -40,9 +40,10 @@ stretch target: final_exact_acc 接近 0.98-0.99
 2. 颜色专用统计分支：CNN 主干使用标准化输入，但颜色统计在模型内部先还原到 `0-1` RGB，再为每个 slot 额外提取 RGB 均值、`red - max(green, blue)` 的均值/最大值、正向红色响应和红色覆盖率；新增覆盖特征经零初始化投影接入，降低对既有字符分支初始化的扰动。
 3. 训练策略：基于训练子集统计的输入标准化、轻量几何/亮度增强、AdamW、label smoothing、按位置统计的字符/颜色类别权重、按颜色模式均衡采样、warmup+cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性位移+尺度 TTA。TTA 的白色填充值会跟随输入标准化计算。
 4. 验证集阈值校准：保留原始 `final_exact_acc`，同时在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，记录 `threshold_final_exact_acc` 和 `color_thresholds`。
-5. 训练集颜色模式先验：只用训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，记录 `pattern_final_exact_acc`；最终 checkpoint 按 `calibrated_final_exact_acc` 选择阈值解码或模式先验解码，不读取或人工修改测试标签。
-6. 字符置信度辅助模式解码：在颜色模式候选打分中可额外加入字符分类头的 slot 置信度，验证集扫描 `pattern_confidence_weight`，只有它提升 `calibrated_final_exact_acc` 时才保存为 `pattern_confidence` 解码方式。
-7. 字符位置先验校准：只用训练子集统计 5 个位置各自的字符分布，在验证集扫描 `char_prior_weight`；只有它提升 `calibrated_final_exact_acc` 时才保存为 `char_prior` 解码方式。
+5. 训练集红色数量先验：只用训练子集统计最终答案长度，也就是红色字符个数，在验证集扫描 `count_prior_weight`；它只约束红色数量，不强制具体位置。
+6. 训练集颜色模式先验：只用训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，记录 `pattern_final_exact_acc`；最终 checkpoint 按 `calibrated_final_exact_acc` 选择阈值解码、数量先验解码或模式先验解码，不读取或人工修改测试标签。
+7. 字符置信度辅助模式解码：在颜色模式候选打分中可额外加入字符分类头的 slot 置信度，验证集扫描 `pattern_confidence_weight`，只有它提升 `calibrated_final_exact_acc` 时才保存为 `pattern_confidence` 解码方式。
+8. 字符位置先验校准：只用训练子集统计 5 个位置各自的字符分布，在验证集扫描 `char_prior_weight`；只有它提升 `calibrated_final_exact_acc` 时才保存为 `char_prior` 解码方式。
 
 这类阈值校准常用于把分类概率转成任务目标所需的离散决策。它不会改变模型接口：
 
@@ -63,9 +64,9 @@ outputs/val_errors.csv
 建议按下面顺序定位问题：
 
 1. 先看 `char_oracle_final_exact_acc` 和 `color_oracle_final_exact_acc`：前者高但总准确率低，说明颜色分支基本够用、字符识别是瓶颈；后者高但总准确率低，说明字符分支基本够用、红色位置判断是瓶颈。
-2. 如果 `calibrated_length_acc` 低，先看 `training_history.csv` 里的 `calibrated_final_exact_acc_len_1...len_5` 和 `samples_len_1...len_5`，判断是否集中坏在某个红色字符数量。
+2. 如果 `calibrated_length_acc` 低，先看 `training_history.csv` 里的 `count_final_exact_acc`、`count_color_acc`、`count_prior_weight`、`calibrated_final_exact_acc_len_1...len_5` 和 `samples_len_1...len_5`，判断是否集中坏在某个红色字符数量。
 3. 如果某些颜色布局明显更差，查看 `calibrated_final_exact_acc_pattern_<color>` 和 `samples_pattern_<color>`；再到 `val_errors.csv` 里按 `target_color`、`target_red_count`、`pred_color_calibrated` 和 `pred_red_count_calibrated` 筛选错误。
-4. 如果 `color_pattern_acc` 或 `target_length_acc` 低，先看 `val_errors.csv` 里的 `red_prob_1...red_prob_5`、`char_conf_1...char_conf_5`、`pred_color_threshold`、`pred_color_pattern_prior`、`pred_color_calibrated` 和保存的 `pattern_confidence_weight`，通常需要调整每个位置的阈值范围、模式先验权重、置信度辅助权重、颜色分支、颜色增强或颜色类别权重。颜色类别权重只按训练子集的各位置统计，可用 `--no-color-class-weight` 做对照。
+4. 如果 `color_pattern_acc` 或 `target_length_acc` 低，先看 `val_errors.csv` 里的 `red_prob_1...red_prob_5`、`char_conf_1...char_conf_5`、`pred_color_threshold`、`pred_color_count_prior`、`pred_color_pattern_prior`、`pred_color_calibrated` 和保存的 `count_prior_weight`、`pattern_confidence_weight`，通常需要调整每个位置的阈值范围、数量先验权重、模式先验权重、置信度辅助权重、颜色分支、颜色增强或颜色类别权重。颜色类别权重只按训练子集的各位置统计，可用 `--no-color-class-weight` 做对照。
 5. 如果 `char_slot_acc` 或 `char_sequence_acc` 低，先看 `char_slot_1_acc...char_slot_5_acc` 是否集中坏在某个位置，再比较 `char_prior_final_exact_acc`、`char_prior_slot_acc`、`char_prior_weight` 和 `char_decode_method`；如果字符先验没帮助，再考虑加大输入宽度、训练轮数、CNN 宽度或字符类别权重。字符类别权重也按位置统计，可通过 `--feature-dim`、`--head-hidden-dim`、`--shared-heads`、`--no-char-class-weight` 和 `--no-char-prior` 做容量/分类头/权重/先验对照。
 6. 如果 `char_conf_*` 普遍低但颜色正确，说明主要是字符分类欠拟合，优先增加 epoch 或 `head_hidden_dim`。
 7. 如果低频颜色模式表现差，保留默认均衡采样；如果高频颜色模式被明显拉低，可用 `--no-balanced-sampler` 做对照。

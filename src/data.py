@@ -134,6 +134,56 @@ def color_indices_from_scores(red_scores: torch.Tensor, threshold: float | Seque
     return (red_scores >= float(threshold)).long()
 
 
+def color_indices_from_count_prior(
+    red_scores: torch.Tensor,
+    count_log_priors: Optional[Sequence[float]] = None,
+    prior_weight: float = 0.0,
+    min_red_count: int = 1,
+    max_red_count: int = NUM_SLOTS,
+) -> torch.Tensor:
+    min_red_count = max(1, int(min_red_count))
+    max_red_count = min(NUM_SLOTS, int(max_red_count))
+    if min_red_count > max_red_count:
+        raise ValueError("min_red_count must be <= max_red_count")
+
+    red_scores = red_scores.clamp(1e-6, 1.0 - 1e-6)
+    red_log_prob = red_scores.log()
+    non_red_log_prob = (1.0 - red_scores).log()
+    score_delta = red_log_prob - non_red_log_prob
+    sorted_delta, sorted_indices = score_delta.sort(dim=-1, descending=True)
+    cumulative_delta = sorted_delta.cumsum(dim=-1)
+    base_score = non_red_log_prob.sum(dim=-1)
+    count_values = list(range(min_red_count, max_red_count + 1))
+
+    count_scores = torch.stack(
+        [base_score + cumulative_delta[:, count - 1] for count in count_values],
+        dim=1,
+    )
+    if count_log_priors is not None and float(prior_weight) != 0.0:
+        if len(count_log_priors) == NUM_SLOTS + 1:
+            prior_values = [float(count_log_priors[count]) for count in count_values]
+        elif len(count_log_priors) == len(count_values):
+            prior_values = [float(value) for value in count_log_priors]
+        else:
+            raise ValueError(
+                f"count_log_priors must contain {NUM_SLOTS + 1} values or {len(count_values)} candidate values"
+            )
+        prior_tensor = torch.tensor(prior_values, dtype=red_scores.dtype, device=red_scores.device)
+        count_scores = count_scores + float(prior_weight) * prior_tensor.view(1, -1)
+
+    best_count_offsets = count_scores.argmax(dim=1)
+    count_tensor = torch.tensor(count_values, dtype=torch.long, device=red_scores.device)
+    best_counts = count_tensor[best_count_offsets]
+    colors = torch.zeros_like(red_scores, dtype=torch.long)
+    for count in count_values:
+        mask = best_counts == count
+        if mask.any():
+            row_indices = mask.nonzero(as_tuple=False).flatten()
+            selected_indices = sorted_indices[row_indices, :count]
+            colors[row_indices.unsqueeze(1), selected_indices] = 1
+    return colors
+
+
 def color_indices_from_pattern_prior(
     red_scores: torch.Tensor,
     patterns: Sequence[str],
@@ -196,6 +246,26 @@ def decode_batch_with_threshold(
     fallback_if_empty: bool = True,
 ) -> list[str]:
     color_indices = color_indices_from_scores(red_scores, threshold)
+    return decode_batch_final(
+        char_indices,
+        color_indices,
+        red_scores=red_scores,
+        fallback_if_empty=fallback_if_empty,
+    )
+
+
+def decode_batch_with_count_prior(
+    char_indices: torch.Tensor,
+    red_scores: torch.Tensor,
+    count_log_priors: Optional[Sequence[float]] = None,
+    prior_weight: float = 0.0,
+    fallback_if_empty: bool = True,
+) -> list[str]:
+    color_indices = color_indices_from_count_prior(
+        red_scores,
+        count_log_priors=count_log_priors,
+        prior_weight=prior_weight,
+    )
     return decode_batch_final(
         char_indices,
         color_indices,
