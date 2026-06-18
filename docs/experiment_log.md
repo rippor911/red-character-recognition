@@ -373,3 +373,79 @@ python -u src/main.py \
   --num-workers 2 \
   --device cuda
 ```
+
+## 2026-06-19 ConvNeXt + FRM-Lite E2
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_frm_lite_e2 \
+  --checkpoint-dir checkpoints/convnext_frm_lite_e2 \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 320 \
+  --learning-rate 3e-4 \
+  --epochs 2 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Result:
+
+```text
+epoch=2
+selected_model=ema
+params=30,644,830
+train_loss=0.4284676435
+val_loss=0.1210689162
+final_exact_acc=0.9528
+calibrated_final_exact_acc=0.9580
+char_slot_acc=0.98208
+char_sequence_acc=0.9144
+color_slot_acc=0.99768
+color_pattern_acc=0.9886
+calibrated_color_pattern_acc=0.9938
+calibrated_length_acc=0.9942
+char_oracle_final_exact_acc=0.9942
+color_oracle_final_exact_acc=0.9636
+color_decode_method=threshold
+char_decode_method=argmax
+color_thresholds=0.950,0.750,0.750,0.950,0.950
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_pool_E2=0.9578
+ConvNeXt_pool_query_E2=0.9580
+gain_vs_baseline=+0.0392
+gain_vs_convnext_pool=+0.0002
+baseline_error=0.0812
+frm_lite_error=0.0420
+relative_error_reduction_vs_baseline=(0.0812 - 0.0420) / 0.0812 = 48.3%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Takeaways:
+
+- FRM-lite is a small positive ablation over ConvNeXt pool slots at epoch 2.
+- The gain is tiny, so the final report should not overclaim it.
+- It is still useful as an innovation point: SVTRv2 feature rearranging adapted to fixed five-slot CAPTCHA recognition.
+- Cost: memory increased from about 4.6GB to about 7.4GB on RTX 4060 Laptop GPU.
+
+Artifacts:
+
+```text
+checkpoints/convnext_frm_lite_e2/baseline_best.pt
+outputs/convnext_frm_lite_e2/training_history.csv
+outputs/convnext_frm_lite_e2/val_predictions.csv
+outputs/convnext_frm_lite_e2/val_errors.csv
+outputs/convnext_frm_lite_e2/submission.csv
+```
