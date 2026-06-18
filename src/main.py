@@ -16,6 +16,7 @@ from data import (
     CHARSET,
     RedCharacterTestDataset,
     RedCharacterTrainDataset,
+    color_indices_from_scores,
     decode_batch_final,
     decode_batch_with_threshold,
     split_train_val,
@@ -514,6 +515,7 @@ def evaluate(
     threshold_candidates = np.linspace(threshold_min, threshold_max, threshold_steps).tolist()
     threshold_candidates.append(0.5)
     threshold_candidates = sorted({round(float(item), 6) for item in threshold_candidates})
+    best_thresholds = [0.5] * 5
     for threshold in threshold_candidates:
         threshold_final = decode_batch_with_threshold(
             pred_chars_all,
@@ -530,6 +532,33 @@ def evaluate(
         ):
             best_threshold_correct = threshold_correct
             best_threshold = threshold
+            best_thresholds = [threshold] * 5
+
+    for slot in range(5):
+        current_threshold = best_thresholds[slot]
+        for threshold in threshold_candidates:
+            candidate_thresholds = best_thresholds.copy()
+            candidate_thresholds[slot] = threshold
+            threshold_final = decode_batch_with_threshold(
+                pred_chars_all,
+                red_probs_all,
+                threshold=candidate_thresholds,
+                fallback_if_empty=True,
+            )
+            threshold_correct = sum(
+                pred == target for pred, target in zip(threshold_final, all_target_final)
+            )
+            current_distance = abs(current_threshold - 0.5)
+            candidate_distance = abs(threshold - 0.5)
+            if threshold_correct > best_threshold_correct or (
+                threshold_correct == best_threshold_correct
+                and candidate_distance < current_distance
+            ):
+                best_threshold_correct = threshold_correct
+                best_thresholds = candidate_thresholds
+                current_threshold = threshold
+
+    best_threshold = float(sum(best_thresholds) / len(best_thresholds))
 
     metrics = {
         "loss": total_loss / total_samples,
@@ -542,6 +571,7 @@ def evaluate(
         "target_length_acc": target_length_correct / total_samples,
         "threshold_final_exact_acc": best_threshold_correct / total_samples,
         "color_threshold": best_threshold,
+        "color_thresholds": best_thresholds,
         "threshold_gain": (best_threshold_correct - final_correct) / total_samples,
     }
     for slot in range(5):
@@ -561,6 +591,19 @@ def eval_metric_is_better(candidate: dict[str, float], incumbent: dict[str, floa
     return candidate_score > incumbent_score or (
         candidate_score == incumbent_score and candidate["loss"] < incumbent["loss"]
     )
+
+
+def threshold_to_list(threshold: float | Sequence[float], num_slots: int = 5) -> list[float]:
+    if isinstance(threshold, (list, tuple)):
+        values = [float(item) for item in threshold]
+        if len(values) != num_slots:
+            raise ValueError(f"threshold must contain {num_slots} values, got {len(values)}")
+        return values
+    return [float(threshold)] * num_slots
+
+
+def format_thresholds(threshold: float | Sequence[float]) -> str:
+    return ",".join(f"{value:.3f}" for value in threshold_to_list(threshold))
 
 
 def compute_color_class_weights(
@@ -617,7 +660,7 @@ def save_validation_diagnostics(
     device: torch.device,
     output_dir: Path,
     split_name: str,
-    color_threshold: float,
+    color_threshold: float | Sequence[float],
     max_error_samples: int,
     tta_shifts: Sequence[int] = (0,),
 ) -> tuple[Path, Path]:
@@ -635,7 +678,7 @@ def save_validation_diagnostics(
         pred_colors = color_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         char_conf = torch.softmax(char_logits, dim=-1).max(dim=-1).values
-        threshold_colors = (red_probs >= color_threshold).long()
+        threshold_colors = color_indices_from_scores(red_probs, color_threshold)
 
         pred_final = decode_batch_final(pred_chars, pred_colors, red_probs, fallback_if_empty=True)
         pred_threshold_final = decode_batch_with_threshold(
@@ -849,7 +892,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"{eval_name}_loss={eval_metrics['loss']:.4f} "
             f"final_exact_acc={eval_metrics['final_exact_acc']:.4f} "
             f"threshold_final_exact_acc={eval_metrics['threshold_final_exact_acc']:.4f} "
-            f"color_threshold={eval_metrics['color_threshold']:.3f} "
+            f"color_thresholds={format_thresholds(eval_metrics['color_thresholds'])} "
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
             f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f} "
@@ -896,6 +939,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     },
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
+                    "color_thresholds": eval_metrics["color_thresholds"],
                     "model_source": eval_source,
                     "ema_decay": config.ema_decay if ema is not None else None,
                     "scheduler": "warmup+cosine" if scheduler is not None else None,
@@ -928,6 +972,12 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.best_checkpoint_path = best_path
     model.best_metrics = checkpoint.get("metrics", {})
     model.color_threshold = float(checkpoint.get("color_threshold", model.best_metrics.get("color_threshold", 0.5)))
+    model.color_thresholds = tuple(
+        checkpoint.get(
+            "color_thresholds",
+            model.best_metrics.get("color_thresholds", threshold_to_list(model.color_threshold)),
+        )
+    )
     model.model_source = str(checkpoint.get("model_source", "raw"))
     model.tta_shifts = tuple(checkpoint.get("tta_shifts", eval_tta_shifts))
     if config.save_val_diagnostics:
@@ -937,7 +987,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             device=device,
             output_dir=config.output_dir,
             split_name=eval_name,
-            color_threshold=model.color_threshold,
+            color_threshold=model.color_thresholds,
             max_error_samples=config.max_error_samples,
             tta_shifts=model.tta_shifts,
         )
@@ -955,9 +1005,15 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     )
     model.eval()
     predictions: list[str] = []
-    color_threshold = float(getattr(model, "color_threshold", 0.5))
+    color_threshold = tuple(
+        getattr(
+            model,
+            "color_thresholds",
+            threshold_to_list(float(getattr(model, "color_threshold", 0.5))),
+        )
+    )
     tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts if config.use_tta else (0,)))
-    print(f"Using color threshold {color_threshold:.3f} for test decoding")
+    print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
     print(f"Using TTA shifts {','.join(str(item) for item in tta_shifts)} for test decoding")
     for batch in test_loader:
         images = batch["image"].to(device)

@@ -105,14 +105,19 @@ def decode_batch_final(
     ]
 
 
-def color_indices_from_scores(red_scores: torch.Tensor, threshold: float) -> torch.Tensor:
-    return (red_scores >= threshold).long()
+def color_indices_from_scores(red_scores: torch.Tensor, threshold: float | Sequence[float]) -> torch.Tensor:
+    if isinstance(threshold, (list, tuple)):
+        threshold_tensor = torch.tensor(threshold, dtype=red_scores.dtype, device=red_scores.device)
+        if threshold_tensor.numel() != red_scores.size(-1):
+            raise ValueError(f"threshold must have {red_scores.size(-1)} values, got {threshold_tensor.numel()}")
+        return (red_scores >= threshold_tensor.view(1, -1)).long()
+    return (red_scores >= float(threshold)).long()
 
 
 def decode_batch_with_threshold(
     char_indices: torch.Tensor,
     red_scores: torch.Tensor,
-    threshold: float,
+    threshold: float | Sequence[float],
     fallback_if_empty: bool = True,
 ) -> list[str]:
     color_indices = color_indices_from_scores(red_scores, threshold)

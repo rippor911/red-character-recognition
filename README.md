@@ -140,7 +140,7 @@ loss = char_loss + color_loss
 ```text
 final_exact_acc
 threshold_final_exact_acc
-color_threshold
+color_thresholds
 char_slot_acc
 color_slot_acc
 color_pattern_acc
@@ -158,7 +158,7 @@ color_slot_1_acc ... color_slot_5_acc
 4. 从左到右拼接对应字符；
 5. 如果没有任何红色预测，则选择红色 logit 最高的位置，避免空答案。
 
-`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上扫描红色概率阈值，并保存最佳 `color_threshold` 到 checkpoint。测试集推理会使用该阈值解码，若没有校准信息则退回 `0.5`。
+`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，并保存最佳 `color_thresholds` 到 checkpoint。测试集推理会使用这些阈值解码，若没有校准信息则退回每个位置 `0.5`。
 
 训练结束后默认保存验证集诊断文件：
 
@@ -210,12 +210,12 @@ Char class weights: min=1.0000 max=1.0000 mean=1.0000
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
 Model parameters: 1,462,062
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.2598 val_loss=3.9604 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0400 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.2598 val_loss=3.9604 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_thresholds=0.500,0.500,0.500,0.500,0.500 char_slot_acc=0.0400 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
 Saved val_errors.csv
-Using color threshold 0.500 for test decoding
+Using color thresholds 0.500,0.500,0.500,0.500,0.500 for test decoding
 Using TTA shifts 0,-2,2 for test decoding
 Saved submission.csv
 ```
@@ -237,9 +237,9 @@ Color class weights: off
 Char class weights: off
 EMA: off
 TTA shifts: 0
-Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1910 debug_train_loss=3.6281 final_exact_acc=0.1250 threshold_final_exact_acc=0.1250 color_threshold=0.500 char_slot_acc=0.1500 color_slot_acc=0.9000 color_pattern_acc=0.5000 threshold_gain=0.0000
+Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1910 debug_train_loss=3.6281 final_exact_acc=0.1250 threshold_final_exact_acc=0.1250 color_thresholds=0.500,0.500,0.500,0.500,0.500 char_slot_acc=0.1500 color_slot_acc=0.9000 color_pattern_acc=0.5000 threshold_gain=0.0000
 ...
-Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.0019 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 color_threshold=0.500 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
+Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.0019 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 color_thresholds=0.500,0.500,0.500,0.500,0.500 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
 Saved debug_train_predictions.csv
 Saved debug_train_errors.csv
 ```
