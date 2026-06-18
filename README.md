@@ -113,7 +113,7 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 -> 5 个 slot 上的局部 1D 卷积上下文混合
 -> 5 个位置的 384 维 slot feature
 -> 位置专用字符分类头 Linear(..., 36)
--> 颜色统计分支提取每个 slot 的 RGB 均值、red-minus-other 均值/最大值、正向红色响应和红色覆盖率
+-> 颜色统计分支在反标准化后的 RGB 空间提取每个 slot 的 RGB 均值、red-minus-other 均值/最大值、正向红色响应和红色覆盖率
 -> 位置专用颜色分类头 Linear(..., 2)
 ```
 
@@ -140,7 +140,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认从训练子集抽样计算全局输入均值/标准差并用于 train/val/test，避免验证或测试信息泄漏；可用 `--normalization fixed` 切回旧的 `mean=0.5,std=0.5`，或用 `--normalization none` 直接使用 `0-1` 像素。对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。训练 loader 默认按 `color` 模式做均衡采样，可加 `--no-balanced-sampler` 关闭。验证和测试默认使用确定性位移+尺度 TTA，平均 `0,-2,2` 三个位移和 `1,0.95,1.05` 三个尺度的 logits；TTA 的白色填充值会随输入标准化同步调整。若需要更快可设 `--tta-scales 1` 或 `--no-tta`。slot pooling 默认使用 `avgmax`，同时保留均值和最大响应；可用 `--slot-pooling avg` 切回最初的纯 `AdaptiveAvgPool2d((1, 5))`。默认还会在 5 个 slot 特征上做一层局部 1D 卷积上下文混合，可加 `--no-slot-context` 关闭做对照。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验、均衡采样和数据增强，便于检查小样本记忆能力。
+正式训练默认从训练子集抽样计算全局输入均值/标准差并用于 train/val/test，避免验证或测试信息泄漏；可用 `--normalization fixed` 切回旧的 `mean=0.5,std=0.5`，或用 `--normalization none` 直接使用 `0-1` 像素。CNN 主干使用标准化输入，颜色统计分支会在模型内部按训练时的 mean/std 还原到 `0-1` RGB 再计算红色特征。对字符分类使用 `label_smoothing=0.03`，并按训练子集里 5 个位置各自的字符频率自动计算类别权重；对颜色分类也按 5 个位置各自的 `u/r` 比例自动计算类别权重。训练 loader 默认按 `color` 模式做均衡采样，可加 `--no-balanced-sampler` 关闭。验证和测试默认使用确定性位移+尺度 TTA，平均 `0,-2,2` 三个位移和 `1,0.95,1.05` 三个尺度的 logits；TTA 的白色填充值会随输入标准化同步调整。若需要更快可设 `--tta-scales 1` 或 `--no-tta`。slot pooling 默认使用 `avgmax`，同时保留均值和最大响应；可用 `--slot-pooling avg` 切回最初的纯 `AdaptiveAvgPool2d((1, 5))`。默认还会在 5 个 slot 特征上做一层局部 1D 卷积上下文混合，可加 `--no-slot-context` 关闭做对照。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `calibrated_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、字符/颜色类别权重、dropout、scheduler、EMA、TTA、颜色模式先验、均衡采样和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 

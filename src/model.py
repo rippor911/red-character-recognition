@@ -159,6 +159,25 @@ class BaselineCNN(nn.Module):
             dim=1,
         )
 
+    def denormalize_images(self, images: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(
+            getattr(self, "input_mean", 0.5),
+            dtype=images.dtype,
+            device=images.device,
+        ).flatten()
+        std = torch.as_tensor(
+            getattr(self, "input_std", 0.5),
+            dtype=images.dtype,
+            device=images.device,
+        ).flatten().clamp_min(1e-6)
+        if mean.numel() == 1:
+            mean = mean.expand(images.size(1))
+        if std.numel() == 1:
+            std = std.expand(images.size(1))
+        mean = mean[: images.size(1)].view(1, -1, 1, 1)
+        std = std[: images.size(1)].view(1, -1, 1, 1)
+        return (images * std + mean).clamp(0.0, 1.0)
+
     def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         features = self.backbone(images)
         avg_slot_features = self.slot_avg_pool(features).squeeze(2).permute(0, 2, 1).contiguous()
@@ -174,8 +193,9 @@ class BaselineCNN(nn.Module):
         slot_features = slot_features + self.position_embedding
         slot_features = self.slot_context(slot_features)
 
-        raw_slots = self.raw_slot_pool(images).squeeze(2).permute(0, 2, 1).contiguous()
-        red_minus_other = images[:, 0:1] - torch.maximum(images[:, 1:2], images[:, 2:3])
+        color_images = self.denormalize_images(images)
+        raw_slots = self.raw_slot_pool(color_images).squeeze(2).permute(0, 2, 1).contiguous()
+        red_minus_other = color_images[:, 0:1] - torch.maximum(color_images[:, 1:2], color_images[:, 2:3])
         red_avg = self.red_slot_avg_pool(red_minus_other).squeeze(2).permute(0, 2, 1).contiguous()
         red_max = self.red_slot_max_pool(red_minus_other).squeeze(2).permute(0, 2, 1).contiguous()
         red_positive = red_minus_other.clamp_min(0.0)
