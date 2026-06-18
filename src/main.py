@@ -21,6 +21,7 @@ from data import (
     decode_batch_final,
     decode_batch_with_pattern_prior,
     decode_batch_with_threshold,
+    load_image_tensor,
     split_train_val,
     validate_submission_frame,
     validate_test_frame,
@@ -58,6 +59,8 @@ class TrainConfig:
     head_hidden_dim: int = 384
     position_specific_heads: bool = True
     slot_pooling: str = "avgmax"
+    normalization: str = "dataset"
+    normalization_samples: int = 2048
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
@@ -110,6 +113,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--head-hidden-dim", type=int, default=384)
     parser.add_argument("--shared-heads", action="store_true")
     parser.add_argument("--slot-pooling", choices=["avg", "max", "avgmax"], default="avgmax")
+    parser.add_argument("--normalization", choices=["dataset", "fixed", "none"], default="dataset")
+    parser.add_argument("--normalization-samples", type=int, default=2048)
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
@@ -159,6 +164,8 @@ def parse_args() -> TrainConfig:
         head_hidden_dim=args.head_hidden_dim,
         position_specific_heads=not args.shared_heads,
         slot_pooling=args.slot_pooling,
+        normalization=args.normalization,
+        normalization_samples=args.normalization_samples,
         use_augmentation=not args.no_augment,
         use_amp=not args.no_amp,
         use_scheduler=not args.no_scheduler,
@@ -329,6 +336,7 @@ def forward_with_tta(
     images: torch.Tensor,
     tta_shifts: Sequence[int],
     tta_scales: Sequence[float] = (1.0,),
+    fill_value: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if len(tta_shifts) <= 1 and len(tta_scales) <= 1:
         return model(images)
@@ -339,7 +347,7 @@ def forward_with_tta(
     for scale in tta_scales:
         scaled_images = scale_images(images, scale)
         for shift_x in tta_shifts:
-            view = translate_images(scaled_images, shift_x=shift_x)
+            view = translate_images(scaled_images, shift_x=shift_x, fill_value=fill_value)
             char_logits, color_logits = model(view)
             char_sum = char_logits if char_sum is None else char_sum + char_logits
             color_sum = color_logits if color_sum is None else color_sum + color_logits
@@ -552,6 +560,7 @@ def evaluate(
     threshold_steps: int = 19,
     tta_shifts: Sequence[int] = (0,),
     tta_scales: Sequence[float] = (1.0,),
+    tta_fill_value: float = 1.0,
     pattern_candidates: Optional[Sequence[str]] = None,
     pattern_log_priors: Optional[Sequence[float]] = None,
     pattern_prior_weights: Sequence[float] = (0.0,),
@@ -582,7 +591,7 @@ def evaluate(
         images = batch["image"].to(device)
         char_target = batch["char_target"].to(device)
         color_target = batch["color_target"].to(device)
-        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
+        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales, fill_value=tta_fill_value)
         loss, char_loss, color_loss = compute_loss(char_logits, color_logits, char_target, color_target)
 
         pred_chars = char_logits.argmax(dim=-1)
@@ -869,6 +878,63 @@ def format_thresholds(threshold: float | Sequence[float]) -> str:
     return ",".join(f"{value:.3f}" for value in threshold_to_list(threshold))
 
 
+def compute_dataset_normalization(
+    df: pd.DataFrame,
+    image_dir: Path,
+    image_size: tuple[int, int],
+    max_samples: int,
+    seed: int,
+) -> tuple[float, float]:
+    if df.empty:
+        return 0.5, 0.5
+    sample_count = len(df) if max_samples <= 0 else min(len(df), max_samples)
+    if sample_count < len(df):
+        sampled_df = df.sample(n=sample_count, random_state=seed).reset_index(drop=True)
+    else:
+        sampled_df = df.sort_values("filename").reset_index(drop=True)
+
+    total_sum = 0.0
+    total_sq_sum = 0.0
+    total_count = 0
+    for filename in sampled_df["filename"].astype(str):
+        image = load_image_tensor(
+            image_dir / filename,
+            image_size=image_size,
+            augment=False,
+            normalize_mean=0.0,
+            normalize_std=1.0,
+        )
+        total_sum += float(image.sum().item())
+        total_sq_sum += float((image * image).sum().item())
+        total_count += int(image.numel())
+
+    mean = total_sum / max(1, total_count)
+    variance = max(1e-6, total_sq_sum / max(1, total_count) - mean * mean)
+    std = max(0.05, float(np.sqrt(variance)))
+    return float(mean), std
+
+
+def resolve_input_normalization(
+    config: TrainConfig,
+    train_split: pd.DataFrame,
+    train_image_dir: Path,
+) -> tuple[float, float, float]:
+    if config.normalization == "none":
+        mean, std = 0.0, 1.0
+    elif config.normalization == "fixed":
+        mean, std = 0.5, 0.5
+    else:
+        mean, std = compute_dataset_normalization(
+            train_split,
+            image_dir=train_image_dir,
+            image_size=config.image_size,
+            max_samples=config.normalization_samples,
+            seed=config.seed,
+        )
+    fill_value = (1.0 - mean) / max(std, 1e-6)
+    return mean, std, fill_value
+
+
 def compute_color_class_weights(
     df: pd.DataFrame,
     device: torch.device,
@@ -1019,6 +1085,7 @@ def save_validation_diagnostics(
     max_error_samples: int,
     tta_shifts: Sequence[int] = (0,),
     tta_scales: Sequence[float] = (1.0,),
+    tta_fill_value: float = 1.0,
     color_decode_method: str = "threshold",
     color_pattern_candidates: Sequence[str] = (),
     color_pattern_log_priors: Sequence[float] = (),
@@ -1035,7 +1102,7 @@ def save_validation_diagnostics(
         color_target = batch["color_target"].to(device)
         filenames = list(batch["filename"])
 
-        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
+        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales, fill_value=tta_fill_value)
         pred_chars = char_logits.argmax(dim=-1)
         pred_colors = color_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
@@ -1203,8 +1270,22 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             device=device,
             max_weight=config.max_color_class_weight,
         )
-    train_dataset = RedCharacterTrainDataset(train_split, train_image_dir, config.image_size, augment=train_augment)
-    val_dataset = RedCharacterTrainDataset(val_split, train_image_dir, config.image_size)
+    input_mean, input_std, tta_fill_value = resolve_input_normalization(config, train_split, train_image_dir)
+    train_dataset = RedCharacterTrainDataset(
+        train_split,
+        train_image_dir,
+        config.image_size,
+        augment=train_augment,
+        normalize_mean=input_mean,
+        normalize_std=input_std,
+    )
+    val_dataset = RedCharacterTrainDataset(
+        val_split,
+        train_image_dir,
+        config.image_size,
+        normalize_mean=input_mean,
+        normalize_std=input_std,
+    )
     train_sampler = None
     sampler_pattern_counts: dict[str, int] = {}
     if balanced_sampler_enabled:
@@ -1237,6 +1318,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         slot_pooling=config.slot_pooling,
     ).to(device)
     model.image_size = config.image_size
+    model.input_mean = float(input_mean)
+    model.input_std = float(input_std)
+    model.tta_fill_value = float(tta_fill_value)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
     scheduler = (
         build_scheduler(optimizer, epochs=config.epochs, warmup_epochs=config.warmup_epochs)
@@ -1257,6 +1341,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
 
     print(f"Device: {device}")
     print(f"Train samples: {len(train_dataset)} | {eval_name} samples: {len(val_dataset)}")
+    print(
+        f"Input normalization: {config.normalization} "
+        f"mean={input_mean:.4f} std={input_std:.4f} white_fill={tta_fill_value:.4f}"
+    )
     print(f"Train augmentation: {'on' if train_augment else 'off'} | AMP: {'on' if use_amp else 'off'}")
     print(
         f"Dropout: {model_dropout:.3f} | label_smoothing: {train_label_smoothing:.3f} "
@@ -1319,6 +1407,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             threshold_steps=config.threshold_steps,
             tta_shifts=eval_tta_shifts,
             tta_scales=eval_tta_scales,
+            tta_fill_value=tta_fill_value,
             pattern_candidates=pattern_candidates,
             pattern_log_priors=pattern_log_priors,
             pattern_prior_weights=config.pattern_prior_weights,
@@ -1338,6 +1427,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     threshold_steps=config.threshold_steps,
                     tta_shifts=eval_tta_shifts,
                     tta_scales=eval_tta_scales,
+                    tta_fill_value=tta_fill_value,
                     pattern_candidates=pattern_candidates,
                     pattern_log_priors=pattern_log_priors,
                     pattern_prior_weights=config.pattern_prior_weights,
@@ -1380,6 +1470,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             "epoch": epoch,
             "lr": current_lr,
             "selected_model": eval_source,
+            "input_normalization": config.normalization,
+            "input_mean": input_mean,
+            "input_std": input_std,
+            "tta_fill_value": tta_fill_value,
             **{f"train_{key}": value for key, value in train_metrics.items()},
             **{f"{eval_name}_{key}": value for key, value in eval_metrics.items()},
             f"{eval_name}_raw_calibrated_final_exact_acc": raw_eval_metrics["calibrated_final_exact_acc"],
@@ -1413,6 +1507,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
                     "color_thresholds": eval_metrics["color_thresholds"],
+                    "input_normalization": config.normalization,
+                    "input_mean": input_mean,
+                    "input_std": input_std,
+                    "tta_fill_value": tta_fill_value,
                     "color_decode_method": eval_metrics["color_decode_method"],
                     "color_pattern_candidates": pattern_candidates,
                     "color_pattern_log_priors": pattern_log_priors,
@@ -1465,6 +1563,10 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.pattern_confidence_weight = float(
         checkpoint.get("pattern_confidence_weight", model.best_metrics.get("pattern_confidence_weight", 0.0))
     )
+    model.input_normalization = str(checkpoint.get("input_normalization", config.normalization))
+    model.input_mean = float(checkpoint.get("input_mean", input_mean))
+    model.input_std = float(checkpoint.get("input_std", input_std))
+    model.tta_fill_value = float(checkpoint.get("tta_fill_value", tta_fill_value))
     model.model_source = str(checkpoint.get("model_source", "raw"))
     model.tta_shifts = tuple(checkpoint.get("tta_shifts", eval_tta_shifts))
     model.tta_scales = tuple(checkpoint.get("tta_scales", eval_tta_scales))
@@ -1479,6 +1581,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             max_error_samples=config.max_error_samples,
             tta_shifts=model.tta_shifts,
             tta_scales=model.tta_scales,
+            tta_fill_value=model.tta_fill_value,
             color_decode_method=model.color_decode_method,
             color_pattern_candidates=model.color_pattern_candidates,
             color_pattern_log_priors=model.color_pattern_log_priors,
@@ -1493,7 +1596,17 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     config = config or TrainConfig()
     device = next(model.parameters()).device
     image_size = getattr(model, "image_size", config.image_size)
-    test_dataset = RedCharacterTestDataset(test_df, config.data_dir / "test" / "images", image_size)
+    has_input_normalization = hasattr(model, "input_mean") and hasattr(model, "input_std")
+    input_mean = float(getattr(model, "input_mean", 0.5))
+    input_std = float(getattr(model, "input_std", 0.5))
+    input_normalization = str(getattr(model, "input_normalization", "fixed" if not has_input_normalization else config.normalization))
+    test_dataset = RedCharacterTestDataset(
+        test_df,
+        config.data_dir / "test" / "images",
+        image_size,
+        normalize_mean=input_mean,
+        normalize_std=input_std,
+    )
     test_loader = build_loader(
         test_dataset, config.batch_size, shuffle=False, seed=config.seed, num_workers=config.num_workers, device=device
     )
@@ -1513,6 +1626,7 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     pattern_confidence_weight = float(getattr(model, "pattern_confidence_weight", 0.0))
     tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts if config.use_tta else (0,)))
     tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales if config.use_tta else (1.0,)))
+    tta_fill_value = float(getattr(model, "tta_fill_value", (1.0 - input_mean) / max(input_std, 1e-6)))
     use_pattern_prior = color_decode_method in {"pattern_prior", "pattern_confidence"} and bool(color_pattern_candidates)
     if use_pattern_prior:
         print(
@@ -1522,11 +1636,21 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
         )
     else:
         print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
+    print(
+        f"Using input normalization {input_normalization} "
+        f"(mean={input_mean:.4f}, std={input_std:.4f}) for test decoding"
+    )
     print(f"Using TTA shifts {','.join(str(item) for item in tta_shifts)} for test decoding")
     print(f"Using TTA scales {','.join(f'{item:g}' for item in tta_scales)} for test decoding")
     for batch in test_loader:
         images = batch["image"].to(device)
-        char_logits, color_logits = forward_with_tta(model, images, tta_shifts, tta_scales)
+        char_logits, color_logits = forward_with_tta(
+            model,
+            images,
+            tta_shifts,
+            tta_scales,
+            fill_value=tta_fill_value,
+        )
         pred_chars = char_logits.argmax(dim=-1)
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         char_confidence = torch.softmax(char_logits, dim=-1).max(dim=-1).values

@@ -63,7 +63,27 @@ def apply_train_augmentation(image: Image.Image) -> Image.Image:
     return image
 
 
-def load_image_tensor(image_path: Path, image_size: tuple[int, int], augment: bool = False) -> torch.Tensor:
+def normalize_image_tensor(
+    tensor: torch.Tensor,
+    mean: float | Sequence[float] = 0.5,
+    std: float | Sequence[float] = 0.5,
+) -> torch.Tensor:
+    mean_tensor = torch.as_tensor(mean, dtype=tensor.dtype, device=tensor.device).flatten()
+    std_tensor = torch.as_tensor(std, dtype=tensor.dtype, device=tensor.device).flatten().clamp_min(1e-6)
+    if mean_tensor.numel() not in {1, tensor.size(0)}:
+        raise ValueError(f"mean must contain 1 or {tensor.size(0)} values, got {mean_tensor.numel()}")
+    if std_tensor.numel() not in {1, tensor.size(0)}:
+        raise ValueError(f"std must contain 1 or {tensor.size(0)} values, got {std_tensor.numel()}")
+    return (tensor - mean_tensor.view(-1, 1, 1)) / std_tensor.view(-1, 1, 1)
+
+
+def load_image_tensor(
+    image_path: Path,
+    image_size: tuple[int, int],
+    augment: bool = False,
+    normalize_mean: float | Sequence[float] = 0.5,
+    normalize_std: float | Sequence[float] = 0.5,
+) -> torch.Tensor:
     height, width = image_size
     with Image.open(image_path) as image:
         image = image.convert("RGB")
@@ -72,7 +92,7 @@ def load_image_tensor(image_path: Path, image_size: tuple[int, int], augment: bo
         image = image.resize((width, height), _RESAMPLE_BILINEAR)
         array = np.asarray(image, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
-    return (tensor - 0.5) / 0.5
+    return normalize_image_tensor(tensor, mean=normalize_mean, std=normalize_std)
 
 
 def decode_final_label(
@@ -275,12 +295,22 @@ def split_train_val(
 
 
 class RedCharacterTrainDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, image_dir: Path, image_size: tuple[int, int], augment: bool = False):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        image_dir: Path,
+        image_size: tuple[int, int],
+        augment: bool = False,
+        normalize_mean: float | Sequence[float] = 0.5,
+        normalize_std: float | Sequence[float] = 0.5,
+    ):
         validate_train_frame(df)
         self.df = df.reset_index(drop=True).copy()
         self.image_dir = Path(image_dir)
         self.image_size = image_size
         self.augment = augment
+        self.normalize_mean = normalize_mean
+        self.normalize_std = normalize_std
 
     def __len__(self) -> int:
         return len(self.df)
@@ -288,7 +318,13 @@ class RedCharacterTrainDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, object]:
         row = self.df.iloc[index]
         filename = str(row["filename"])
-        image = load_image_tensor(self.image_dir / filename, self.image_size, augment=self.augment)
+        image = load_image_tensor(
+            self.image_dir / filename,
+            self.image_size,
+            augment=self.augment,
+            normalize_mean=self.normalize_mean,
+            normalize_std=self.normalize_std,
+        )
         char_target = torch.tensor(encode_chars(str(row["all_label"])), dtype=torch.long)
         color_target = torch.tensor(encode_colors(str(row["color"])), dtype=torch.long)
         return {
@@ -300,18 +336,33 @@ class RedCharacterTrainDataset(Dataset):
 
 
 class RedCharacterTestDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, image_dir: Path, image_size: tuple[int, int]):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        image_dir: Path,
+        image_size: tuple[int, int],
+        normalize_mean: float | Sequence[float] = 0.5,
+        normalize_std: float | Sequence[float] = 0.5,
+    ):
         validate_test_frame(df)
         self.df = df.reset_index(drop=True).copy()
         self.image_dir = Path(image_dir)
         self.image_size = image_size
+        self.normalize_mean = normalize_mean
+        self.normalize_std = normalize_std
 
     def __len__(self) -> int:
         return len(self.df)
 
     def __getitem__(self, index: int) -> dict[str, object]:
         filename = str(self.df.iloc[index]["id"])
-        image = load_image_tensor(self.image_dir / filename, self.image_size, augment=False)
+        image = load_image_tensor(
+            self.image_dir / filename,
+            self.image_size,
+            augment=False,
+            normalize_mean=self.normalize_mean,
+            normalize_std=self.normalize_std,
+        )
         return {"image": image, "filename": filename}
 
 
