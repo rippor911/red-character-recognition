@@ -58,6 +58,101 @@ python src/main.py \
   --device cuda
 ```
 
+## 2026-06-19 ConvNeXt-Tiny Pool E6
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_tiny_pool_e6 \
+  --checkpoint-dir checkpoints/convnext_tiny_pool_e6 \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 320 \
+  --learning-rate 2e-4 \
+  --epochs 6 \
+  --batch-size 32 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Best validation result:
+
+```text
+best_epoch=5
+selected_model=ema
+val_loss=0.0687181046
+final_exact_acc=0.9772
+calibrated_final_exact_acc=0.9780
+char_slot_acc=0.98924
+char_sequence_acc=0.9472
+color_slot_acc=0.99920
+color_pattern_acc=0.9962
+calibrated_color_pattern_acc=0.9968
+calibrated_length_acc=0.9968
+char_oracle_final_exact_acc=0.9968
+color_oracle_final_exact_acc=0.9810
+char_decode_method=char_prior
+char_prior_weight=1.00
+color_decode_method=threshold
+color_thresholds=0.850,0.500,0.600,0.500,0.750
+```
+
+Learning curve:
+
+```text
+epoch 1: calibrated_final_exact_acc=0.9330
+epoch 2: calibrated_final_exact_acc=0.9572
+epoch 3: calibrated_final_exact_acc=0.9682
+epoch 4: calibrated_final_exact_acc=0.9754
+epoch 5: calibrated_final_exact_acc=0.9780
+epoch 6: calibrated_final_exact_acc=0.9772
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_FRM-lite_E2=0.9580
+ConvNeXt_pool_E6=0.9780
+gain_vs_baseline=+0.0592
+gain_vs_previous_best=+0.0200
+baseline_error=0.0812
+pool_e6_error=0.0220
+relative_error_reduction_vs_baseline=(0.0812 - 0.0220) / 0.0812 = 72.9%
+```
+
+Takeaways:
+
+- Longer fine-tuning is much more important than the early FRM-lite gain.
+- The best epoch is 5; epoch 6 slightly regressed, so the saved checkpoint uses epoch 5.
+- Remaining errors are now small; color accuracy is almost saturated and most remaining room is character recognition on long red patterns.
+
+Artifacts:
+
+```text
+checkpoints/convnext_tiny_pool_e6/baseline_best.pt
+outputs/convnext_tiny_pool_e6/training_history.csv
+outputs/convnext_tiny_pool_e6/val_predictions.csv
+outputs/convnext_tiny_pool_e6/val_errors.csv
+outputs/convnext_tiny_pool_e6/submission.csv
+```
+
+## Updated Current Best
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots
+checkpoint=checkpoints/convnext_tiny_pool_e6/baseline_best.pt
+submission=outputs/convnext_tiny_pool_e6/submission.csv
+calibrated_final_exact_acc=0.9780
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0592
+relative_error_reduction=72.9%
+```
+
 Model:
 
 ```text
