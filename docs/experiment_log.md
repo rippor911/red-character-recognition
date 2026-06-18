@@ -1179,3 +1179,139 @@ logs/convnext_160x480_ft_lr5e6_e2.out.log
 logs/convnext_160x480_ft_lr5e6_e2.err.log
 ```
 
+## 2026-06-19 192x576 Character-Weighted Fine-Tune E2
+
+Motivation:
+
+- The 160x480 model improved exact accuracy to 0.9860, while the lower-lr continuation at the same resolution did not improve.
+- I tested whether adding more input detail again, from 160x480 to 192x576, could reduce the remaining visually similar character errors.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_charweight_e2 \
+  --checkpoint-dir checkpoints/convnext_192x576_charweight_e2 \
+  --init-checkpoint checkpoints/convnext_160x480_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 5e-6 \
+  --epochs 2 \
+  --batch-size 12 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Best result:
+
+```text
+best_epoch=2
+selected_model=raw
+train_loss=0.3865
+val_loss=0.0449
+final_exact_acc=0.9858
+threshold_final_exact_acc=0.9864
+calibrated_final_exact_acc=0.9866
+char_slot_acc=0.99288
+char_sequence_acc=0.9650
+color_slot_acc=0.99964
+color_pattern_acc=0.9982
+char_oracle_final_exact_acc=0.9988
+color_oracle_final_exact_acc=0.9876
+color_thresholds=0.950,0.600,0.500,0.500,0.950
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_160x480_char_weight_E2=0.9860
+ConvNeXt_192x576_char_weight_E2=0.9866
+gain_vs_baseline=+0.0678
+gain_vs_previous_best=+0.0006
+baseline_error=0.0812
+current_error=0.0134
+relative_error_reduction_vs_baseline=(0.0812 - 0.0134) / 0.0812 = 83.5%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Validation error analysis:
+
+```text
+errors=67
+char_all_wrong=61
+color_wrong=7
+length_wrong=6
+top_confusions=O->0:5, 0->O:4, I->1:4, Q->O:3, 1->I:3, L->I:2, E->F:2, O->Q:2, S->5:2
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_192x576_charweight_e2/submission.csv
+columns=id,label
+rows=5000
+unique_ids=5000
+labels_match_[0-9A-Z]{1,5}=True
+```
+
+Takeaways:
+
+- 192x576 gives a small positive gain over 160x480, but only after the second epoch; the first epoch dropped to 0.9832.
+- Higher resolution still helps, but the marginal gain is much smaller than 128x384 -> 160x480.
+- Batch size 12 fits on the local RTX 4060 and used about 5.3GB GPU memory during training.
+- Remaining errors are now only 67/5000, still dominated by ambiguous glyph pairs rather than red-color detection.
+
+Artifacts:
+
+```text
+checkpoints/convnext_192x576_charweight_e2/baseline_best.pt
+outputs/convnext_192x576_charweight_e2/training_history.csv
+outputs/convnext_192x576_charweight_e2/val_predictions.csv
+outputs/convnext_192x576_charweight_e2/val_errors.csv
+outputs/convnext_192x576_charweight_e2/submission.csv
+logs/convnext_192x576_charweight_e2.out.log
+logs/convnext_192x576_charweight_e2.err.log
+```
+
+## Updated Current Best 6
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + 192x576 input + checkpoint fine-tuning + character-weighted loss
+checkpoint=checkpoints/convnext_192x576_charweight_e2/baseline_best.pt
+submission=outputs/convnext_192x576_charweight_e2/submission.csv
+calibrated_final_exact_acc=0.9866
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0678
+relative_error_reduction=83.5%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_charweight_e2 \
+  --checkpoint-dir checkpoints/convnext_192x576_charweight_e2 \
+  --init-checkpoint checkpoints/convnext_160x480_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 5e-6 \
+  --epochs 2 \
+  --batch-size 12 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
