@@ -168,3 +168,17 @@ Saved submission.csv
 ```
 
 当前工作目录没有官方 `dataset/`，所以尚未记录 50,000 张训练集上的正式验证结果；放入官方数据后运行默认命令即可得到真实指标。
+
+小样本过拟合临时检查：
+
+```bash
+python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoint-dir <temp_checkpoints> --debug-overfit --debug-samples 8 --epochs 30 --batch-size 4 --skip-test
+```
+
+结果摘要：
+
+```text
+Epoch 01/30 train_loss=4.1382 debug_train_loss=4.2694 final_exact_acc=0.0000 char_slot_acc=0.0250 color_slot_acc=0.4500 color_pattern_acc=0.0000
+...
+Epoch 30/30 train_loss=0.0778 debug_train_loss=0.0902 final_exact_acc=1.0000 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000
+```
