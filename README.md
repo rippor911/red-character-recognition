@@ -55,6 +55,8 @@ seed=2026
 device=cuda if available else cpu
 weight_decay=1e-4
 label_smoothing=0.03
+color_class_weight=on
+max_color_class_weight=3.0
 train_augmentation=on
 cosine_scheduler=on
 amp=cuda only
@@ -121,7 +123,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认对字符分类使用 `label_smoothing=0.03`，并维护 EMA 权重；每个 epoch 会同时评估 raw/EMA，保存 `threshold_final_exact_acc` 更高的版本。`--debug-overfit` 会自动关闭 label smoothing、dropout、scheduler、EMA 和数据增强，便于检查小样本记忆能力。
+正式训练默认对字符分类使用 `label_smoothing=0.03`，对颜色分类按训练子集里的 `u/r` 位置比例自动计算类别权重，并维护 EMA 权重；每个 epoch 会同时评估 raw/EMA，保存 `threshold_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、颜色类别权重、dropout、scheduler、EMA 和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -195,9 +197,10 @@ Device: cuda
 Train samples: 7 | val samples: 5
 Train augmentation: on | AMP: on
 Dropout: 0.100 | label_smoothing: 0.030 | scheduler: on
+Color class weights: u=0.8000 r=1.2000
 EMA: on decay=0.99900
 Model parameters: 277,590
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.1585 val_loss=4.0098 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.2123 val_loss=4.0692 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
@@ -219,6 +222,7 @@ python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoi
 ```text
 Train augmentation: off | AMP: on
 Dropout: 0.000 | label_smoothing: 0.000 | scheduler: off
+Color class weights: off
 EMA: off
 Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1320 debug_train_loss=3.8508 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0750 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
 ...

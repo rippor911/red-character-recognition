@@ -45,6 +45,8 @@ class TrainConfig:
     label_smoothing: float = 0.03
     char_loss_weight: float = 1.0
     color_loss_weight: float = 1.0
+    use_color_class_weight: bool = True
+    max_color_class_weight: float = 3.0
     max_grad_norm: float = 5.0
     dropout: float = 0.1
     head_hidden_dim: int = 256
@@ -82,6 +84,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--label-smoothing", type=float, default=0.03)
     parser.add_argument("--char-loss-weight", type=float, default=1.0)
     parser.add_argument("--color-loss-weight", type=float, default=1.0)
+    parser.add_argument("--no-color-class-weight", action="store_true")
+    parser.add_argument("--max-color-class-weight", type=float, default=3.0)
     parser.add_argument("--max-grad-norm", type=float, default=5.0)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--head-hidden-dim", type=int, default=256)
@@ -116,6 +120,8 @@ def parse_args() -> TrainConfig:
         label_smoothing=args.label_smoothing,
         char_loss_weight=args.char_loss_weight,
         color_loss_weight=args.color_loss_weight,
+        use_color_class_weight=not args.no_color_class_weight,
+        max_color_class_weight=args.max_color_class_weight,
         max_grad_norm=args.max_grad_norm,
         dropout=args.dropout,
         head_hidden_dim=args.head_hidden_dim,
@@ -256,13 +262,18 @@ def compute_loss(
     label_smoothing: float = 0.0,
     char_loss_weight: float = 1.0,
     color_loss_weight: float = 1.0,
+    color_class_weights: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     char_loss = F.cross_entropy(
         char_logits.reshape(-1, len(CHARSET)),
         char_target.reshape(-1),
         label_smoothing=label_smoothing,
     )
-    color_loss = F.cross_entropy(color_logits.reshape(-1, 2), color_target.reshape(-1))
+    color_loss = F.cross_entropy(
+        color_logits.reshape(-1, 2),
+        color_target.reshape(-1),
+        weight=color_class_weights,
+    )
     loss = char_loss * char_loss_weight + color_loss * color_loss_weight
     return loss, char_loss, color_loss
 
@@ -279,6 +290,7 @@ def train_one_epoch(
     color_loss_weight: float,
     max_grad_norm: float,
     ema: Optional[ModelEMA] = None,
+    color_class_weights: Optional[torch.Tensor] = None,
 ) -> dict[str, float]:
     model.train()
     total_loss = 0.0
@@ -301,6 +313,7 @@ def train_one_epoch(
                 label_smoothing=label_smoothing,
                 char_loss_weight=char_loss_weight,
                 color_loss_weight=color_loss_weight,
+                color_class_weights=color_class_weights,
             )
         if scaler.is_enabled():
             scaler.scale(loss).backward()
@@ -450,6 +463,25 @@ def eval_metric_is_better(candidate: dict[str, float], incumbent: dict[str, floa
     )
 
 
+def compute_color_class_weights(
+    df: pd.DataFrame,
+    device: torch.device,
+    max_weight: float,
+) -> torch.Tensor:
+    counts = torch.zeros(2, dtype=torch.float32)
+    for color in df["color"].astype(str):
+        normalized = color.strip().lower()
+        counts[0] += normalized.count("u")
+        counts[1] += normalized.count("r")
+    if torch.any(counts <= 0):
+        return torch.ones(2, dtype=torch.float32, device=device)
+    weights = counts.sum() / (2.0 * counts)
+    if max_weight > 0:
+        weights = torch.clamp(weights, max=max_weight)
+    weights = weights / weights.mean()
+    return weights.to(device)
+
+
 def char_indices_to_string(indices: list[int]) -> str:
     return "".join(CHARSET[int(index)] for index in indices)
 
@@ -564,6 +596,13 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         eval_name = "val"
 
     train_augment = config.use_augmentation and not config.debug_overfit
+    color_class_weights = None
+    if config.use_color_class_weight and not config.debug_overfit:
+        color_class_weights = compute_color_class_weights(
+            train_split,
+            device=device,
+            max_weight=config.max_color_class_weight,
+        )
     train_dataset = RedCharacterTrainDataset(train_split, train_image_dir, config.image_size, augment=train_augment)
     val_dataset = RedCharacterTrainDataset(val_split, train_image_dir, config.image_size)
     train_loader = build_loader(
@@ -608,6 +647,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         f"Dropout: {model_dropout:.3f} | label_smoothing: {train_label_smoothing:.3f} "
         f"| scheduler: {'on' if scheduler is not None else 'off'}"
     )
+    if color_class_weights is None:
+        print("Color class weights: off")
+    else:
+        color_weights = color_class_weights.detach().cpu().tolist()
+        print(f"Color class weights: u={color_weights[0]:.4f} r={color_weights[1]:.4f}")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"Model parameters: {count_parameters(model):,}")
 
@@ -625,6 +669,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             color_loss_weight=config.color_loss_weight,
             max_grad_norm=config.max_grad_norm,
             ema=ema,
+            color_class_weights=color_class_weights,
         )
         raw_eval_metrics = evaluate(
             model,
@@ -701,6 +746,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "color_threshold": eval_metrics["color_threshold"],
                     "model_source": eval_source,
                     "ema_decay": config.ema_decay if ema is not None else None,
+                    "color_class_weights": (
+                        color_class_weights.detach().cpu().tolist()
+                        if color_class_weights is not None
+                        else None
+                    ),
                     "epoch": epoch,
                 },
                 best_path,
