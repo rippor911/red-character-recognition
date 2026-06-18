@@ -54,6 +54,8 @@ class TrainConfig:
     threshold_min: float = 0.05
     threshold_max: float = 0.95
     threshold_steps: int = 19
+    save_val_diagnostics: bool = True
+    max_error_samples: int = 200
     val_ratio: float = 0.1
     seed: int = 2026
     num_workers: int = 0
@@ -87,6 +89,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--threshold-min", type=float, default=0.05)
     parser.add_argument("--threshold-max", type=float, default=0.95)
     parser.add_argument("--threshold-steps", type=int, default=19)
+    parser.add_argument("--no-val-diagnostics", action="store_true")
+    parser.add_argument("--max-error-samples", type=int, default=200)
     parser.add_argument("--val-ratio", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -117,6 +121,8 @@ def parse_args() -> TrainConfig:
         threshold_min=args.threshold_min,
         threshold_max=args.threshold_max,
         threshold_steps=args.threshold_steps,
+        save_val_diagnostics=not args.no_val_diagnostics,
+        max_error_samples=args.max_error_samples,
         val_ratio=args.val_ratio,
         seed=args.seed,
         num_workers=args.num_workers,
@@ -298,6 +304,10 @@ def evaluate(
     color_slot_correct = 0
     color_pattern_correct = 0
     total_slots = 0
+    target_length_correct = 0
+    char_correct_by_slot = torch.zeros(5, dtype=torch.long)
+    color_correct_by_slot = torch.zeros(5, dtype=torch.long)
+    total_by_slot = torch.zeros(5, dtype=torch.long)
     all_pred_chars: list[torch.Tensor] = []
     all_red_probs: list[torch.Tensor] = []
     all_target_final: list[str] = []
@@ -325,6 +335,11 @@ def evaluate(
         char_slot_correct += (pred_chars == char_target).sum().item()
         color_slot_correct += (pred_colors == color_target).sum().item()
         color_pattern_correct += (pred_colors == color_target).all(dim=1).sum().item()
+        target_length_correct += sum(len(pred) == len(target) for pred, target in zip(pred_final, target_final))
+        slot_count = pred_chars.size(1)
+        char_correct_by_slot[:slot_count] += (pred_chars == char_target).detach().cpu().sum(dim=0)
+        color_correct_by_slot[:slot_count] += (pred_colors == color_target).detach().cpu().sum(dim=0)
+        total_by_slot[:slot_count] += batch_size
         all_pred_chars.append(pred_chars.detach().cpu())
         all_red_probs.append(red_probs.detach().cpu())
         all_target_final.extend(target_final)
@@ -358,7 +373,7 @@ def evaluate(
             best_threshold_correct = threshold_correct
             best_threshold = threshold
 
-    return {
+    metrics = {
         "loss": total_loss / total_samples,
         "char_loss": total_char_loss / total_samples,
         "color_loss": total_color_loss / total_samples,
@@ -366,14 +381,111 @@ def evaluate(
         "char_slot_acc": char_slot_correct / total_slots,
         "color_slot_acc": color_slot_correct / total_slots,
         "color_pattern_acc": color_pattern_correct / total_samples,
+        "target_length_acc": target_length_correct / total_samples,
         "threshold_final_exact_acc": best_threshold_correct / total_samples,
         "color_threshold": best_threshold,
         "threshold_gain": (best_threshold_correct - final_correct) / total_samples,
     }
+    for slot in range(5):
+        denominator = max(1, int(total_by_slot[slot].item()))
+        metrics[f"char_slot_{slot + 1}_acc"] = int(char_correct_by_slot[slot].item()) / denominator
+        metrics[f"color_slot_{slot + 1}_acc"] = int(color_correct_by_slot[slot].item()) / denominator
+    return metrics
 
 
 def count_parameters(model: nn.Module) -> int:
     return sum(param.numel() for param in model.parameters() if param.requires_grad)
+
+
+def char_indices_to_string(indices: list[int]) -> str:
+    return "".join(CHARSET[int(index)] for index in indices)
+
+
+def color_indices_to_pattern(indices: list[int]) -> str:
+    return "".join("r" if int(index) == 1 else "u" for index in indices)
+
+
+@torch.no_grad()
+def save_validation_diagnostics(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    output_dir: Path,
+    split_name: str,
+    color_threshold: float,
+    max_error_samples: int,
+) -> tuple[Path, Path]:
+    model.eval()
+    rows: list[dict[str, object]] = []
+
+    for batch in loader:
+        images = batch["image"].to(device)
+        char_target = batch["char_target"].to(device)
+        color_target = batch["color_target"].to(device)
+        filenames = list(batch["filename"])
+
+        char_logits, color_logits = model(images)
+        pred_chars = char_logits.argmax(dim=-1)
+        pred_colors = color_logits.argmax(dim=-1)
+        red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
+        char_conf = torch.softmax(char_logits, dim=-1).max(dim=-1).values
+        threshold_colors = (red_probs >= color_threshold).long()
+
+        pred_final = decode_batch_final(pred_chars, pred_colors, red_probs, fallback_if_empty=True)
+        pred_threshold_final = decode_batch_with_threshold(
+            pred_chars,
+            red_probs,
+            threshold=color_threshold,
+            fallback_if_empty=True,
+        )
+        target_final = decode_batch_final(char_target, color_target, fallback_if_empty=False)
+
+        pred_chars_rows = pred_chars.detach().cpu().tolist()
+        pred_colors_rows = pred_colors.detach().cpu().tolist()
+        threshold_colors_rows = threshold_colors.detach().cpu().tolist()
+        red_prob_rows = red_probs.detach().cpu().tolist()
+        char_conf_rows = char_conf.detach().cpu().tolist()
+        target_chars_rows = char_target.detach().cpu().tolist()
+        target_colors_rows = color_target.detach().cpu().tolist()
+
+        for row_index, filename in enumerate(filenames):
+            target_all_label = char_indices_to_string(target_chars_rows[row_index])
+            pred_all_label = char_indices_to_string(pred_chars_rows[row_index])
+            target_color = color_indices_to_pattern(target_colors_rows[row_index])
+            pred_color = color_indices_to_pattern(pred_colors_rows[row_index])
+            threshold_color = color_indices_to_pattern(threshold_colors_rows[row_index])
+            row: dict[str, object] = {
+                "filename": filename,
+                "target_all_label": target_all_label,
+                "target_color": target_color,
+                "target_label": target_final[row_index],
+                "pred_all_label": pred_all_label,
+                "pred_color_argmax": pred_color,
+                "pred_color_threshold": threshold_color,
+                "pred_label_argmax": pred_final[row_index],
+                "pred_label_threshold": pred_threshold_final[row_index],
+                "argmax_correct": pred_final[row_index] == target_final[row_index],
+                "threshold_correct": pred_threshold_final[row_index] == target_final[row_index],
+                "char_all_correct": pred_all_label == target_all_label,
+                "color_argmax_correct": pred_color == target_color,
+                "color_threshold_correct": threshold_color == target_color,
+            }
+            for slot in range(5):
+                row[f"red_prob_{slot + 1}"] = round(float(red_prob_rows[row_index][slot]), 6)
+                row[f"char_conf_{slot + 1}"] = round(float(char_conf_rows[row_index][slot]), 6)
+            rows.append(row)
+
+    predictions_path = output_dir / f"{split_name}_predictions.csv"
+    errors_path = output_dir / f"{split_name}_errors.csv"
+    predictions = pd.DataFrame(rows)
+    errors = predictions.loc[~predictions["threshold_correct"]].copy()
+    if max_error_samples >= 0:
+        errors = errors.head(max_error_samples)
+    predictions.to_csv(predictions_path, index=False)
+    errors.to_csv(errors_path, index=False)
+    print(f"Saved {split_name} predictions to {predictions_path}")
+    print(f"Saved {split_name} errors to {errors_path}")
+    return predictions_path, errors_path
 
 
 def load_checkpoint(path: Path, device: torch.device) -> dict[str, object]:
@@ -518,6 +630,16 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     model.best_checkpoint_path = best_path
     model.best_metrics = checkpoint.get("metrics", {})
     model.color_threshold = float(checkpoint.get("color_threshold", model.best_metrics.get("color_threshold", 0.5)))
+    if config.save_val_diagnostics:
+        save_validation_diagnostics(
+            model=model,
+            loader=val_loader,
+            device=device,
+            output_dir=config.output_dir,
+            split_name=eval_name,
+            color_threshold=model.color_threshold,
+            max_error_samples=config.max_error_samples,
+        )
     return model
 
 

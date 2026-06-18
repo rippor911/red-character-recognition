@@ -46,3 +46,20 @@ stretch target: final_exact_acc 接近 0.98-0.99
 ```python
 char_logits, color_logits = model(images)
 ```
+
+## 使用诊断文件继续提分
+
+训练完成后查看：
+
+```text
+outputs/training_history.csv
+outputs/val_predictions.csv
+outputs/val_errors.csv
+```
+
+建议按下面顺序定位问题：
+
+1. 如果 `color_pattern_acc` 或 `target_length_acc` 低，先看 `val_errors.csv` 里的 `red_prob_1...red_prob_5` 和 `pred_color_threshold`，通常需要调整阈值范围、颜色分支或颜色增强。
+2. 如果 `char_slot_acc` 低，先看 `char_slot_1_acc...char_slot_5_acc` 是否集中坏在某个位置，再考虑加大输入宽度、训练轮数或 CNN 宽度。
+3. 如果 `char_conf_*` 普遍低但颜色正确，说明主要是字符分类欠拟合，优先增加 epoch 或 `head_hidden_dim`。
+4. 如果训练集小样本能记住但验证集不上升，优先减弱增强、调高 dropout/weight decay 或检查 train/val 分布。
