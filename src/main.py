@@ -94,6 +94,7 @@ class TrainConfig:
     debug_overfit: bool = False
     debug_samples: int = 128
     predict_only: bool = False
+    eval_checkpoint: bool = False
     skip_test: bool = False
     expected_test_rows: Optional[int] = 5000
 
@@ -155,6 +156,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--debug-overfit", action="store_true")
     parser.add_argument("--debug-samples", type=int, default=128)
     parser.add_argument("--predict-only", action="store_true")
+    parser.add_argument("--eval-checkpoint", action="store_true")
     parser.add_argument("--skip-test", action="store_true")
     parser.add_argument("--expected-test-rows", type=int, default=5000)
     args = parser.parse_args()
@@ -213,6 +215,7 @@ def parse_args() -> TrainConfig:
         debug_overfit=args.debug_overfit,
         debug_samples=args.debug_samples,
         predict_only=args.predict_only,
+        eval_checkpoint=args.eval_checkpoint,
         skip_test=args.skip_test,
         expected_test_rows=args.expected_test_rows,
     )
@@ -1579,6 +1582,135 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
     return model
 
 
+def evaluate_checkpoint_model(
+    train_df: pd.DataFrame,
+    config: Optional[TrainConfig] = None,
+) -> tuple[BaselineCNN, dict[str, object]]:
+    config = config or TrainConfig()
+    set_seed(config.seed)
+    device = resolve_device(config.device)
+    model = load_model_from_checkpoint(resolve_checkpoint_path(config), config)
+    train_image_dir = config.data_dir / "train" / "images"
+
+    if config.debug_overfit:
+        val_split = train_df.sort_values("filename").head(config.debug_samples).reset_index(drop=True)
+        eval_name = "debug_train"
+    else:
+        _, val_split = split_train_val(train_df, val_ratio=config.val_ratio, seed=config.seed)
+        eval_name = "val"
+
+    input_mean = float(getattr(model, "input_mean", 0.5))
+    input_std = float(getattr(model, "input_std", 0.5))
+    val_dataset = RedCharacterTrainDataset(
+        val_split,
+        train_image_dir,
+        getattr(model, "image_size", config.image_size),
+        normalize_mean=input_mean,
+        normalize_std=input_std,
+    )
+    val_loader = build_loader(
+        val_dataset,
+        config.batch_size,
+        shuffle=False,
+        seed=config.seed,
+        num_workers=config.num_workers,
+        device=device,
+    )
+
+    eval_tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts)) if config.use_tta else (0,)
+    eval_tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales)) if config.use_tta else (1.0,)
+    tta_fill_value = float(getattr(model, "tta_fill_value", (1.0 - input_mean) / max(input_std, 1e-6)))
+    char_log_priors = (
+        tuple(tuple(float(value) for value in row) for row in getattr(model, "char_log_priors", ()))
+        if config.use_char_prior
+        else ()
+    )
+    count_log_priors = (
+        tuple(float(value) for value in getattr(model, "count_log_priors", ()))
+        if config.use_count_prior
+        else ()
+    )
+    pattern_candidates = tuple(getattr(model, "color_pattern_candidates", ())) if config.use_pattern_prior else ()
+    pattern_log_priors = (
+        tuple(float(value) for value in getattr(model, "color_pattern_log_priors", ()))
+        if config.use_pattern_prior
+        else ()
+    )
+
+    print(f"Evaluating checkpoint on {eval_name} samples: {len(val_dataset)}")
+    metrics = evaluate(
+        model,
+        val_loader,
+        device=device,
+        threshold_min=config.threshold_min,
+        threshold_max=config.threshold_max,
+        threshold_steps=config.threshold_steps,
+        tta_shifts=eval_tta_shifts,
+        tta_scales=eval_tta_scales,
+        tta_fill_value=tta_fill_value,
+        char_log_priors=char_log_priors,
+        char_prior_weights=config.char_prior_weights,
+        count_log_priors=count_log_priors,
+        count_prior_weights=config.count_prior_weights,
+        pattern_candidates=pattern_candidates,
+        pattern_log_priors=pattern_log_priors,
+        pattern_prior_weights=config.pattern_prior_weights,
+        pattern_confidence_weights=config.pattern_confidence_weights,
+    )
+    model.best_metrics = metrics
+    model.color_threshold = float(metrics["color_threshold"])
+    model.color_thresholds = tuple(float(value) for value in threshold_to_list(metrics["color_thresholds"]))
+    model.color_decode_method = str(metrics["color_decode_method"])
+    model.char_decode_method = str(metrics["char_decode_method"])
+    model.char_prior_weight = float(metrics["char_prior_weight"])
+    model.count_prior_weight = float(metrics["count_prior_weight"])
+    model.pattern_prior_weight = float(metrics["pattern_prior_weight"])
+    model.pattern_confidence_weight = float(metrics["pattern_confidence_weight"])
+    model.tta_shifts = eval_tta_shifts
+    model.tta_scales = eval_tta_scales
+
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = config.output_dir / f"{eval_name}_checkpoint_metrics.csv"
+    pd.DataFrame([metrics]).to_csv(metrics_path, index=False)
+    print(
+        f"Checkpoint {eval_name}: "
+        f"loss={metrics['loss']:.4f} "
+        f"final_exact_acc={metrics['final_exact_acc']:.4f} "
+        f"calibrated_final_exact_acc={metrics['calibrated_final_exact_acc']:.4f} "
+        f"char_slot_acc={metrics['char_slot_acc']:.4f} "
+        f"color_slot_acc={metrics['color_slot_acc']:.4f} "
+        f"color_pattern_acc={metrics['color_pattern_acc']:.4f} "
+        f"decode={metrics['color_decode_method']} "
+        f"color_thresholds={format_thresholds(metrics['color_thresholds'])}"
+    )
+    print(f"Saved checkpoint evaluation metrics to {metrics_path}")
+
+    if config.save_val_diagnostics:
+        save_validation_diagnostics(
+            model=model,
+            loader=val_loader,
+            device=device,
+            output_dir=config.output_dir,
+            split_name=f"{eval_name}_checkpoint",
+            color_threshold=model.color_thresholds,
+            max_error_samples=config.max_error_samples,
+            tta_shifts=eval_tta_shifts,
+            tta_scales=eval_tta_scales,
+            tta_fill_value=tta_fill_value,
+            color_decode_method=model.color_decode_method,
+            char_decode_method=model.char_decode_method,
+            char_log_priors=char_log_priors,
+            char_prior_weight=model.char_prior_weight,
+            count_log_priors=count_log_priors,
+            count_prior_weight=model.count_prior_weight,
+            color_pattern_candidates=pattern_candidates,
+            color_pattern_log_priors=pattern_log_priors,
+            pattern_prior_weight=model.pattern_prior_weight,
+            pattern_confidence_weight=model.pattern_confidence_weight,
+        )
+    return model, metrics
+
+
 def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) -> BaselineCNN:
     config = config or TrainConfig()
     set_seed(config.seed)
@@ -2009,8 +2141,8 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
     color_pattern_log_priors = tuple(getattr(model, "color_pattern_log_priors", ()))
     pattern_prior_weight = float(getattr(model, "pattern_prior_weight", 0.0))
     pattern_confidence_weight = float(getattr(model, "pattern_confidence_weight", 0.0))
-    tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts if config.use_tta else (0,)))
-    tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales if config.use_tta else (1.0,)))
+    tta_shifts = tuple(getattr(model, "tta_shifts", config.tta_shifts)) if config.use_tta else (0,)
+    tta_scales = tuple(getattr(model, "tta_scales", config.tta_scales)) if config.use_tta else (1.0,)
     tta_fill_value = float(getattr(model, "tta_fill_value", (1.0 - input_mean) / max(input_std, 1e-6)))
     use_pattern_prior = color_decode_method in {"pattern_prior", "pattern_confidence"} and bool(color_pattern_candidates)
     use_count_prior = color_decode_method == "count_prior" and bool(count_log_priors)
@@ -2115,6 +2247,16 @@ def main():
         return
 
     train_df = load_train_data(config.data_dir)
+    if config.eval_checkpoint:
+        model, _ = evaluate_checkpoint_model(train_df, config)
+        if config.skip_test:
+            print("Evaluated checkpoint and skipped test inference by request.")
+            return
+        test_df = load_test_data(config.data_dir)
+        predictions = predict_test(model, test_df, config)
+        save_submission(test_df, predictions, config)
+        return
+
     model = train_model(train_df, config)
     if config.skip_test:
         print("Skipped test inference by request.")

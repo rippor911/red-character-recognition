@@ -51,6 +51,14 @@ python src/main.py --predict-only --checkpoint-path checkpoints/baseline_best.pt
 
 如果省略 `--checkpoint-path`，`--predict-only` 会默认读取 `--checkpoint-dir` 下的 `baseline_best.pt`。
 
+重新加载 checkpoint 并按固定验证划分输出指标：
+
+```bash
+python src/main.py --eval-checkpoint --checkpoint-path checkpoints/baseline_best.pt --skip-test
+```
+
+`--eval-checkpoint` 会复用 checkpoint 中保存的输入尺寸、归一化、TTA 与解码先验；不加 `--skip-test` 时会在评估后继续生成 `outputs/submission.csv`。
+
 默认参数：
 
 ```text
