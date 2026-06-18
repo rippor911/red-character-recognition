@@ -1,4 +1,4 @@
-# Experiment Log
+﻿# Experiment Log
 
 ## 2026-06-19 Setup
 
@@ -955,3 +955,141 @@ python -u src/main.py \
   --char-loss-weight 1.5 \
   --color-loss-weight 0.5
 ```
+
+## 2026-06-19 160x480 Character-Weighted Fine-Tune E2
+
+Motivation:
+
+- The 128x384 character-weighted model still made 82 validation errors.
+- Remaining mistakes are dominated by visually similar characters such as `I/1`, `O/0`, `E/F`, and `Q/O`.
+- I increased input resolution to 160x480 while keeping the same ConvNeXt-Tiny backbone and character-weighted loss, to preserve more stroke-level detail.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_160x480_charweight_e2 \
+  --checkpoint-dir checkpoints/convnext_160x480_charweight_e2 \
+  --init-checkpoint checkpoints/convnext_highres_ft_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 160 \
+  --image-width 480 \
+  --learning-rate 1e-5 \
+  --epochs 2 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Best result:
+
+```text
+best_epoch=2
+selected_model=ema
+train_loss=0.3868
+val_loss=0.0448
+final_exact_acc=0.9854
+threshold_final_exact_acc=0.9860
+calibrated_final_exact_acc=0.9860
+char_slot_acc=0.99296
+char_sequence_acc=0.9652
+color_slot_acc=0.99960
+color_pattern_acc=0.9980
+char_oracle_final_exact_acc=0.9986
+color_oracle_final_exact_acc=0.9874
+color_thresholds=0.950,0.500,0.750,0.500,0.650
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_highres_char_weight_E1=0.9836
+ConvNeXt_160x480_char_weight_E2=0.9860
+gain_vs_baseline=+0.0672
+gain_vs_previous_best=+0.0024
+baseline_error=0.0812
+current_error=0.0140
+relative_error_reduction_vs_baseline=(0.0812 - 0.0140) / 0.0812 = 82.8%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Validation error analysis:
+
+```text
+errors=70
+char_all_wrong=63
+color_wrong=7
+length_wrong=7
+top_confusions=I->1:5, O->0:5, E->F:4, L->I:3, Q->O:3, 0->O:2, J->I:2
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_160x480_charweight_e2/submission.csv
+columns=id,label
+rows=5000
+unique_ids=5000
+labels_match_[0-9A-Z]{1,5}=True
+```
+
+Takeaways:
+
+- Higher input resolution is the strongest improvement after the pretrained ConvNeXt backbone and is a clear report point.
+- The exact-accuracy gain mainly comes from character recognition: `char_slot_acc` improved from 0.99136 to 0.99296 versus the 128x384 character-weighted run.
+- The run fits on the local RTX 4060 with batch size 16 and uses about 5.2GB GPU memory during training.
+- The remaining 70 validation errors are still mostly character confusions, so future work should target ambiguous glyph pairs rather than color classification.
+
+Artifacts:
+
+```text
+checkpoints/convnext_160x480_charweight_e2/baseline_best.pt
+outputs/convnext_160x480_charweight_e2/training_history.csv
+outputs/convnext_160x480_charweight_e2/val_predictions.csv
+outputs/convnext_160x480_charweight_e2/val_errors.csv
+outputs/convnext_160x480_charweight_e2/submission.csv
+logs/convnext_160x480_charweight_e2.out.log
+logs/convnext_160x480_charweight_e2.err.log
+```
+
+## Updated Current Best 5
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + 160x480 input + checkpoint fine-tuning + character-weighted loss
+checkpoint=checkpoints/convnext_160x480_charweight_e2/baseline_best.pt
+submission=outputs/convnext_160x480_charweight_e2/submission.csv
+calibrated_final_exact_acc=0.9860
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0672
+relative_error_reduction=82.8%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_160x480_charweight_e2 \
+  --checkpoint-dir checkpoints/convnext_160x480_charweight_e2 \
+  --init-checkpoint checkpoints/convnext_highres_ft_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 160 \
+  --image-width 480 \
+  --learning-rate 1e-5 \
+  --epochs 2 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
