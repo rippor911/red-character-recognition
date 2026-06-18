@@ -1093,3 +1093,89 @@ python -u src/main.py \
   --color-loss-weight 0.5
 ```
 
+## 2026-06-19 160x480 Lower-LR Continuation E2
+
+Motivation:
+
+- The 160x480 run reached 0.9860, so I tested whether a smaller learning rate could squeeze out extra accuracy without changing the architecture.
+- This run continues from the 160x480 best checkpoint and keeps the same character-weighted loss.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_160x480_ft_lr5e6_e2 \
+  --checkpoint-dir checkpoints/convnext_160x480_ft_lr5e6_e2 \
+  --init-checkpoint checkpoints/convnext_160x480_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 160 \
+  --image-width 480 \
+  --learning-rate 5e-6 \
+  --epochs 2 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Best result:
+
+```text
+best_epoch=1
+selected_model=ema
+train_loss=0.3732
+val_loss=0.0442
+final_exact_acc=0.9852
+threshold_final_exact_acc=0.9858
+calibrated_final_exact_acc=0.9860
+char_slot_acc=0.99288
+char_sequence_acc=0.9642
+color_slot_acc=0.99968
+color_pattern_acc=0.9984
+char_oracle_final_exact_acc=0.9990
+color_oracle_final_exact_acc=0.9868
+color_thresholds=0.850,0.500,0.500,0.500,0.950
+```
+
+Comparison:
+
+```text
+ConvNeXt_160x480_char_weight_E2=0.9860
+ConvNeXt_160x480_lr5e6_E1=0.9860
+gain_vs_previous_best=+0.0000
+validation_errors=70
+target_met=True
+```
+
+Validation error analysis:
+
+```text
+errors=70
+char_all_wrong=65
+color_wrong=5
+length_wrong=5
+top_confusions=I->1:6, O->0:5, E->F:4, L->I:3, Q->O:3, 1->I:3
+```
+
+Takeaways:
+
+- Lowering the learning rate to 5e-6 did not improve exact accuracy beyond 0.9860.
+- It slightly reduced color/length errors but increased character-only errors, so the current best remains the earlier 160x480 run.
+- Next useful directions should change information or decoding, not just continue the same fine-tuning recipe.
+
+Artifacts:
+
+```text
+checkpoints/convnext_160x480_ft_lr5e6_e2/baseline_best.pt
+outputs/convnext_160x480_ft_lr5e6_e2/training_history.csv
+outputs/convnext_160x480_ft_lr5e6_e2/val_predictions.csv
+outputs/convnext_160x480_ft_lr5e6_e2/val_errors.csv
+outputs/convnext_160x480_ft_lr5e6_e2/submission.csv
+logs/convnext_160x480_ft_lr5e6_e2.out.log
+logs/convnext_160x480_ft_lr5e6_e2.err.log
+```
+
