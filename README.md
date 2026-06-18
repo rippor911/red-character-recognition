@@ -143,6 +143,8 @@ threshold_final_exact_acc
 threshold_color_acc
 pattern_final_exact_acc
 calibrated_final_exact_acc
+calibrated_color_pattern_acc
+calibrated_length_acc
 color_decode_method
 color_thresholds
 pattern_prior_weight
@@ -153,6 +155,8 @@ calibrated_gain
 target_length_acc
 char_slot_1_acc ... char_slot_5_acc
 color_slot_1_acc ... color_slot_5_acc
+calibrated_final_exact_acc_len_1 ... calibrated_final_exact_acc_len_5
+calibrated_final_exact_acc_pattern_<color>
 ```
 
 最终答案解码逻辑：
@@ -172,7 +176,7 @@ outputs/val_predictions.csv
 outputs/val_errors.csv
 ```
 
-其中包含每张验证图的目标标签、预测标签、argmax/阈值/模式先验/最终校准颜色模式、红色概率和字符置信度。若只想训练不导出诊断，可加 `--no-val-diagnostics`；错误样本数量可用 `--max-error-samples` 控制。
+其中包含每张验证图的目标标签、预测标签、argmax/阈值/模式先验/最终校准颜色模式、红色概率、红色数量和字符置信度。若只想训练不导出诊断，可加 `--no-val-diagnostics`；错误样本数量可用 `--max-error-samples` 控制。
 
 ## 提交文件校验
 
@@ -207,7 +211,7 @@ python src/main.py --data-dir <temp_data> --output-dir <temp_outputs> --checkpoi
 
 ```text
 Device: cuda
-Train samples: 7 | val samples: 5
+Train samples: 6 | val samples: 6
 Train augmentation: on | AMP: on
 Dropout: 0.100 | label_smoothing: 0.030 | scheduler: warmup+cosine warmup_epochs=2
 Color class weights: per-slot shape=(5, 2) min=0.5000 max=1.5000 mean=1.0000 r_by_slot=1.250,1.000,1.000,1.000,1.500
@@ -216,7 +220,7 @@ EMA: on decay=0.99900
 TTA shifts: 0,-2,2
 Color pattern prior: on candidates=6 weights=0,0.25,0.5,1,1.5,2 top=rruuu:0.167, ruruu:0.167, urruu:0.167, ururu:0.167, uurru:0.167, ...
 Model parameters: 1,462,062
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.4405 val_loss=3.9738 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.4405 val_loss=3.9738 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv

@@ -658,6 +658,42 @@ def evaluate(
     if use_pattern_candidates and best_pattern_correct > best_threshold_correct:
         calibrated_correct = best_pattern_correct
         color_decode_method = "pattern_prior"
+    if color_decode_method == "pattern_prior":
+        calibrated_final = decode_batch_with_pattern_prior(
+            pred_chars_all,
+            red_probs_all,
+            patterns=pattern_candidates or (),
+            pattern_log_priors=pattern_log_priors,
+            prior_weight=best_pattern_prior_weight,
+            fallback_if_empty=True,
+        )
+        calibrated_colors = color_indices_from_pattern_prior(
+            red_probs_all,
+            patterns=pattern_candidates or (),
+            pattern_log_priors=pattern_log_priors,
+            prior_weight=best_pattern_prior_weight,
+        )
+    else:
+        calibrated_final = decode_batch_with_threshold(
+            pred_chars_all,
+            red_probs_all,
+            threshold=best_thresholds,
+            fallback_if_empty=True,
+        )
+        calibrated_colors = best_threshold_colors
+
+    calibrated_length_correct = sum(
+        len(pred) == len(target) for pred, target in zip(calibrated_final, all_target_final)
+    )
+    calibrated_correct_flags = [
+        int(pred == target) for pred, target in zip(calibrated_final, all_target_final)
+    ]
+    target_lengths = target_colors_all.sum(dim=1).long().tolist()
+    target_patterns = [
+        color_indices_to_pattern(row)
+        for row in target_colors_all.long().tolist()
+    ]
+    calibrated_pattern_correct = (calibrated_colors == target_colors_all).all(dim=1).sum().item()
 
     metrics = {
         "loss": total_loss / total_samples,
@@ -676,6 +712,8 @@ def evaluate(
         "pattern_color_acc": best_pattern_color_correct / total_samples,
         "pattern_prior_weight": best_pattern_prior_weight,
         "calibrated_final_exact_acc": calibrated_correct / total_samples,
+        "calibrated_color_pattern_acc": calibrated_pattern_correct / total_samples,
+        "calibrated_length_acc": calibrated_length_correct / total_samples,
         "calibrated_gain": (calibrated_correct - final_correct) / total_samples,
         "color_decode_method": color_decode_method,
         "threshold_gain": (best_threshold_correct - final_correct) / total_samples,
@@ -684,6 +722,26 @@ def evaluate(
         denominator = max(1, int(total_by_slot[slot].item()))
         metrics[f"char_slot_{slot + 1}_acc"] = int(char_correct_by_slot[slot].item()) / denominator
         metrics[f"color_slot_{slot + 1}_acc"] = int(color_correct_by_slot[slot].item()) / denominator
+    for target_length in range(1, 6):
+        flags = [
+            correct
+            for correct, length in zip(calibrated_correct_flags, target_lengths)
+            if int(length) == target_length
+        ]
+        metrics[f"samples_len_{target_length}"] = len(flags)
+        metrics[f"calibrated_final_exact_acc_len_{target_length}"] = (
+            sum(flags) / len(flags) if flags else 0.0
+        )
+    for pattern in sorted(set(target_patterns)):
+        flags = [
+            correct
+            for correct, target_pattern in zip(calibrated_correct_flags, target_patterns)
+            if target_pattern == pattern
+        ]
+        metrics[f"samples_pattern_{pattern}"] = len(flags)
+        metrics[f"calibrated_final_exact_acc_pattern_{pattern}"] = (
+            sum(flags) / len(flags) if flags else 0.0
+        )
     return metrics
 
 
@@ -892,16 +950,20 @@ def save_validation_diagnostics(
             threshold_color = color_indices_to_pattern(threshold_colors_rows[row_index])
             pattern_color = color_indices_to_pattern(pattern_colors_rows[row_index])
             calibrated_color = color_indices_to_pattern(calibrated_colors_rows[row_index])
+            target_red_count = target_color.count("r")
+            calibrated_red_count = calibrated_color.count("r")
             row: dict[str, object] = {
                 "filename": filename,
                 "target_all_label": target_all_label,
                 "target_color": target_color,
+                "target_red_count": target_red_count,
                 "target_label": target_final[row_index],
                 "pred_all_label": pred_all_label,
                 "pred_color_argmax": pred_color,
                 "pred_color_threshold": threshold_color,
                 "pred_color_pattern_prior": pattern_color,
                 "pred_color_calibrated": calibrated_color,
+                "pred_red_count_calibrated": calibrated_red_count,
                 "pred_label_argmax": pred_final[row_index],
                 "pred_label_threshold": pred_threshold_final[row_index],
                 "pred_label_pattern_prior": pred_pattern_final[row_index],
@@ -910,6 +972,7 @@ def save_validation_diagnostics(
                 "threshold_correct": pred_threshold_final[row_index] == target_final[row_index],
                 "pattern_prior_correct": pred_pattern_final[row_index] == target_final[row_index],
                 "calibrated_correct": pred_calibrated_final[row_index] == target_final[row_index],
+                "calibrated_length_correct": len(pred_calibrated_final[row_index]) == len(target_final[row_index]),
                 "char_all_correct": pred_all_label == target_all_label,
                 "color_argmax_correct": pred_color == target_color,
                 "color_threshold_correct": threshold_color == target_color,
@@ -1112,6 +1175,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
             f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f} "
+            f"calibrated_color_pattern_acc={eval_metrics['calibrated_color_pattern_acc']:.4f} "
+            f"calibrated_length_acc={eval_metrics['calibrated_length_acc']:.4f} "
             f"calibrated_gain={eval_metrics['calibrated_gain']:.4f}"
             + (
                 f" raw_calibrated_final_exact_acc={raw_eval_metrics['calibrated_final_exact_acc']:.4f} "

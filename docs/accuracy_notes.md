@@ -60,9 +60,11 @@ outputs/val_errors.csv
 
 建议按下面顺序定位问题：
 
-1. 如果 `color_pattern_acc` 或 `target_length_acc` 低，先看 `val_errors.csv` 里的 `red_prob_1...red_prob_5`、`pred_color_threshold`、`pred_color_pattern_prior` 和 `pred_color_calibrated`，通常需要调整每个位置的阈值范围、模式先验权重、颜色分支、颜色增强或颜色类别权重。颜色类别权重只按训练子集的各位置统计，可用 `--no-color-class-weight` 做对照。
-2. 如果 `char_slot_acc` 低，先看 `char_slot_1_acc...char_slot_5_acc` 是否集中坏在某个位置，再考虑加大输入宽度、训练轮数、CNN 宽度或字符类别权重；字符类别权重也按位置统计，可通过 `--feature-dim`、`--head-hidden-dim`、`--shared-heads` 和 `--no-char-class-weight` 做容量/分类头/权重对照。
-3. 如果 `char_conf_*` 普遍低但颜色正确，说明主要是字符分类欠拟合，优先增加 epoch 或 `head_hidden_dim`。
-4. 如果训练集小样本能记住但验证集不上升，优先减弱增强、调高 dropout/weight decay 或检查 train/val 分布。
-5. 如果 `training_history.csv` 中 `val_ema_calibrated_final_exact_acc` 高于 `val_raw_calibrated_final_exact_acc`，说明 EMA 更稳；如果 raw 长期更高，可以临时加 `--no-ema` 做对照实验。
-6. 如果验证/测试图像存在轻微水平偏移，默认 TTA 会平均 `0,-2,2` 三个水平平移视图；如果发现 TTA 变慢或无收益，可加 `--no-tta` 或调整 `--tta-shifts` 做对照。
+1. 如果 `calibrated_length_acc` 低，先看 `training_history.csv` 里的 `calibrated_final_exact_acc_len_1...len_5` 和 `samples_len_1...len_5`，判断是否集中坏在某个红色字符数量。
+2. 如果某些颜色布局明显更差，查看 `calibrated_final_exact_acc_pattern_<color>` 和 `samples_pattern_<color>`；再到 `val_errors.csv` 里按 `target_color`、`target_red_count`、`pred_color_calibrated` 和 `pred_red_count_calibrated` 筛选错误。
+3. 如果 `color_pattern_acc` 或 `target_length_acc` 低，先看 `val_errors.csv` 里的 `red_prob_1...red_prob_5`、`pred_color_threshold`、`pred_color_pattern_prior` 和 `pred_color_calibrated`，通常需要调整每个位置的阈值范围、模式先验权重、颜色分支、颜色增强或颜色类别权重。颜色类别权重只按训练子集的各位置统计，可用 `--no-color-class-weight` 做对照。
+4. 如果 `char_slot_acc` 低，先看 `char_slot_1_acc...char_slot_5_acc` 是否集中坏在某个位置，再考虑加大输入宽度、训练轮数、CNN 宽度或字符类别权重；字符类别权重也按位置统计，可通过 `--feature-dim`、`--head-hidden-dim`、`--shared-heads` 和 `--no-char-class-weight` 做容量/分类头/权重对照。
+5. 如果 `char_conf_*` 普遍低但颜色正确，说明主要是字符分类欠拟合，优先增加 epoch 或 `head_hidden_dim`。
+6. 如果训练集小样本能记住但验证集不上升，优先减弱增强、调高 dropout/weight decay 或检查 train/val 分布。
+7. 如果 `training_history.csv` 中 `val_ema_calibrated_final_exact_acc` 高于 `val_raw_calibrated_final_exact_acc`，说明 EMA 更稳；如果 raw 长期更高，可以临时加 `--no-ema` 做对照实验。
+8. 如果验证/测试图像存在轻微水平偏移，默认 TTA 会平均 `0,-2,2` 三个水平平移视图；如果发现 TTA 变慢或无收益，可加 `--no-tta` 或调整 `--tta-shifts` 做对照。
