@@ -74,6 +74,8 @@ class TrainConfig:
     threshold_min: float = 0.05
     threshold_max: float = 0.95
     threshold_steps: int = 19
+    use_char_prior: bool = True
+    char_prior_weights: tuple[float, ...] = (0.0, 0.1, 0.25, 0.5, 1.0)
     use_pattern_prior: bool = True
     pattern_prior_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
     pattern_confidence_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0)
@@ -129,6 +131,8 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--threshold-min", type=float, default=0.05)
     parser.add_argument("--threshold-max", type=float, default=0.95)
     parser.add_argument("--threshold-steps", type=int, default=19)
+    parser.add_argument("--no-char-prior", action="store_true")
+    parser.add_argument("--char-prior-weights", type=str, default="0,0.1,0.25,0.5,1")
     parser.add_argument("--no-pattern-prior", action="store_true")
     parser.add_argument("--pattern-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
     parser.add_argument("--pattern-confidence-weights", type=str, default="0,0.25,0.5,1")
@@ -181,6 +185,8 @@ def parse_args() -> TrainConfig:
         threshold_min=args.threshold_min,
         threshold_max=args.threshold_max,
         threshold_steps=args.threshold_steps,
+        use_char_prior=not args.no_char_prior,
+        char_prior_weights=parse_float_sequence(args.char_prior_weights),
         use_pattern_prior=not args.no_pattern_prior,
         pattern_prior_weights=parse_float_sequence(args.pattern_prior_weights),
         pattern_confidence_weights=parse_float_sequence(args.pattern_confidence_weights),
@@ -564,6 +570,8 @@ def evaluate(
     tta_shifts: Sequence[int] = (0,),
     tta_scales: Sequence[float] = (1.0,),
     tta_fill_value: float = 1.0,
+    char_log_priors: Optional[Sequence[Sequence[float]]] = None,
+    char_prior_weights: Sequence[float] = (0.0,),
     pattern_candidates: Optional[Sequence[str]] = None,
     pattern_log_priors: Optional[Sequence[float]] = None,
     pattern_prior_weights: Sequence[float] = (0.0,),
@@ -584,6 +592,7 @@ def evaluate(
     color_correct_by_slot = torch.zeros(5, dtype=torch.long)
     total_by_slot = torch.zeros(5, dtype=torch.long)
     all_pred_chars: list[torch.Tensor] = []
+    all_char_logits: list[torch.Tensor] = []
     all_red_probs: list[torch.Tensor] = []
     all_char_confidence: list[torch.Tensor] = []
     all_target_chars: list[torch.Tensor] = []
@@ -620,6 +629,7 @@ def evaluate(
         color_correct_by_slot[:slot_count] += (pred_colors == color_target).detach().cpu().sum(dim=0)
         total_by_slot[:slot_count] += batch_size
         all_pred_chars.append(pred_chars.detach().cpu())
+        all_char_logits.append(char_logits.detach().cpu())
         all_red_probs.append(red_probs.detach().cpu())
         all_char_confidence.append(char_confidence.detach().cpu())
         all_target_chars.append(char_target.detach().cpu())
@@ -627,6 +637,7 @@ def evaluate(
         all_target_final.extend(target_final)
 
     pred_chars_all = torch.cat(all_pred_chars, dim=0)
+    char_logits_all = torch.cat(all_char_logits, dim=0)
     red_probs_all = torch.cat(all_red_probs, dim=0)
     char_confidence_all = torch.cat(all_char_confidence, dim=0)
     target_chars_all = torch.cat(all_target_chars, dim=0)
@@ -770,6 +781,45 @@ def evaluate(
         )
         calibrated_colors = best_threshold_colors
 
+    best_char_prior_weight = 0.0
+    best_char_prior_correct = calibrated_correct
+    best_char_prior_slot_correct = char_slot_correct
+    best_calibrated_chars = pred_chars_all
+    best_calibrated_final = calibrated_final
+    char_prior_enabled = bool(char_log_priors)
+    if char_prior_enabled:
+        candidate_char_weights = list(char_prior_weights) or [0.0]
+        if 0.0 not in candidate_char_weights:
+            candidate_char_weights.insert(0, 0.0)
+        for prior_weight in candidate_char_weights:
+            candidate_chars = apply_char_prior(
+                char_logits_all,
+                char_log_priors=char_log_priors,
+                prior_weight=float(prior_weight),
+            )
+            candidate_final = decode_batch_final(
+                candidate_chars,
+                calibrated_colors,
+                red_scores=red_probs_all,
+                fallback_if_empty=True,
+            )
+            candidate_correct = sum(
+                pred == target for pred, target in zip(candidate_final, all_target_final)
+            )
+            candidate_slot_correct = (candidate_chars == target_chars_all).sum().item()
+            if candidate_correct > best_char_prior_correct or (
+                candidate_correct == best_char_prior_correct
+                and abs(float(prior_weight)) < abs(best_char_prior_weight)
+            ):
+                best_char_prior_correct = candidate_correct
+                best_char_prior_slot_correct = int(candidate_slot_correct)
+                best_char_prior_weight = float(prior_weight)
+                best_calibrated_chars = candidate_chars
+                best_calibrated_final = candidate_final
+
+    calibrated_correct = best_char_prior_correct
+    calibrated_final = best_calibrated_final
+    char_decode_method = "char_prior" if best_char_prior_weight != 0.0 else "argmax"
     calibrated_length_correct = sum(
         len(pred) == len(target) for pred, target in zip(calibrated_final, all_target_final)
     )
@@ -782,6 +832,7 @@ def evaluate(
         for row in target_colors_all.long().tolist()
     ]
     calibrated_pattern_correct = (calibrated_colors == target_colors_all).all(dim=1).sum().item()
+    calibrated_char_slot_correct = (best_calibrated_chars == target_chars_all).sum().item()
     char_sequence_correct = (pred_chars_all == target_chars_all).all(dim=1).sum().item()
     color_oracle_final = decode_batch_final(
         pred_chars_all,
@@ -820,10 +871,15 @@ def evaluate(
         "pattern_color_acc": best_pattern_color_correct / total_samples,
         "pattern_prior_weight": best_pattern_prior_weight,
         "pattern_confidence_weight": best_pattern_confidence_weight,
+        "char_prior_final_exact_acc": best_char_prior_correct / total_samples,
+        "char_prior_slot_acc": best_char_prior_slot_correct / total_slots,
+        "char_prior_weight": best_char_prior_weight,
+        "char_decode_method": char_decode_method,
         "calibrated_final_exact_acc": calibrated_correct / total_samples,
         "char_oracle_final_exact_acc": char_oracle_correct / total_samples,
         "color_oracle_final_exact_acc": color_oracle_correct / total_samples,
         "calibrated_color_pattern_acc": calibrated_pattern_correct / total_samples,
+        "calibrated_char_slot_acc": calibrated_char_slot_correct / total_slots,
         "calibrated_length_acc": calibrated_length_correct / total_samples,
         "calibrated_gain": (calibrated_correct - final_correct) / total_samples,
         "color_decode_method": color_decode_method,
@@ -879,6 +935,40 @@ def threshold_to_list(threshold: float | Sequence[float], num_slots: int = 5) ->
 
 def format_thresholds(threshold: float | Sequence[float]) -> str:
     return ",".join(f"{value:.3f}" for value in threshold_to_list(threshold))
+
+
+def build_char_position_prior(df: pd.DataFrame, smoothing: float = 1.0) -> list[list[float]]:
+    char_to_idx = {char: idx for idx, char in enumerate(CHARSET)}
+    counts = torch.full((5, len(CHARSET)), float(max(0.0, smoothing)), dtype=torch.float32)
+    for label in df["all_label"].astype(str):
+        normalized = label.strip().upper()
+        if len(normalized) != 5:
+            continue
+        for slot_idx, char in enumerate(normalized):
+            if char in char_to_idx:
+                counts[slot_idx, char_to_idx[char]] += 1.0
+    log_priors = torch.log(counts / counts.sum(dim=1, keepdim=True).clamp_min(1e-6))
+    return log_priors.tolist()
+
+
+def apply_char_prior(
+    char_logits: torch.Tensor,
+    char_log_priors: Optional[Sequence[Sequence[float]]],
+    prior_weight: float,
+) -> torch.Tensor:
+    if not char_log_priors or float(prior_weight) == 0.0:
+        return char_logits.argmax(dim=-1)
+    prior_tensor = torch.tensor(char_log_priors, dtype=char_logits.dtype, device=char_logits.device)
+    if prior_tensor.shape != char_logits.shape[-2:]:
+        raise ValueError(
+            f"char_log_priors must have shape {tuple(char_logits.shape[-2:])}, got {tuple(prior_tensor.shape)}"
+        )
+    char_scores = torch.log_softmax(char_logits, dim=-1) + float(prior_weight) * prior_tensor.view(
+        1,
+        prior_tensor.size(0),
+        prior_tensor.size(1),
+    )
+    return char_scores.argmax(dim=-1)
 
 
 def compute_dataset_normalization(
@@ -1090,6 +1180,9 @@ def save_validation_diagnostics(
     tta_scales: Sequence[float] = (1.0,),
     tta_fill_value: float = 1.0,
     color_decode_method: str = "threshold",
+    char_decode_method: str = "argmax",
+    char_log_priors: Sequence[Sequence[float]] = (),
+    char_prior_weight: float = 0.0,
     color_pattern_candidates: Sequence[str] = (),
     color_pattern_log_priors: Sequence[float] = (),
     pattern_prior_weight: float = 0.0,
@@ -1144,7 +1237,21 @@ def save_validation_diagnostics(
         else:
             pred_pattern_final = pred_threshold_final
         calibrated_colors = pattern_colors if use_pattern_prior else threshold_colors
-        pred_calibrated_final = pred_pattern_final if use_pattern_prior else pred_threshold_final
+        color_calibrated_final = pred_pattern_final if use_pattern_prior else pred_threshold_final
+        char_prior_chars = apply_char_prior(
+            char_logits,
+            char_log_priors=char_log_priors,
+            prior_weight=char_prior_weight,
+        )
+        pred_char_prior_final = decode_batch_final(
+            char_prior_chars,
+            calibrated_colors,
+            red_scores=red_probs,
+            fallback_if_empty=True,
+        )
+        use_char_prior = char_decode_method == "char_prior" and bool(char_log_priors)
+        calibrated_chars = char_prior_chars if use_char_prior else pred_chars
+        pred_calibrated_final = pred_char_prior_final if use_char_prior else color_calibrated_final
         pred_color_oracle_final = decode_batch_final(
             pred_chars,
             color_target,
@@ -1159,6 +1266,7 @@ def save_validation_diagnostics(
         target_final = decode_batch_final(char_target, color_target, fallback_if_empty=False)
 
         pred_chars_rows = pred_chars.detach().cpu().tolist()
+        calibrated_chars_rows = calibrated_chars.detach().cpu().tolist()
         pred_colors_rows = pred_colors.detach().cpu().tolist()
         threshold_colors_rows = threshold_colors.detach().cpu().tolist()
         pattern_colors_rows = pattern_colors.detach().cpu().tolist()
@@ -1171,6 +1279,7 @@ def save_validation_diagnostics(
         for row_index, filename in enumerate(filenames):
             target_all_label = char_indices_to_string(target_chars_rows[row_index])
             pred_all_label = char_indices_to_string(pred_chars_rows[row_index])
+            pred_all_label_calibrated = char_indices_to_string(calibrated_chars_rows[row_index])
             target_color = color_indices_to_pattern(target_colors_rows[row_index])
             pred_color = color_indices_to_pattern(pred_colors_rows[row_index])
             threshold_color = color_indices_to_pattern(threshold_colors_rows[row_index])
@@ -1185,28 +1294,34 @@ def save_validation_diagnostics(
                 "target_red_count": target_red_count,
                 "target_label": target_final[row_index],
                 "pred_all_label": pred_all_label,
+                "pred_all_label_calibrated": pred_all_label_calibrated,
                 "pred_color_argmax": pred_color,
                 "pred_color_threshold": threshold_color,
                 "pred_color_pattern_prior": pattern_color,
                 "pred_color_calibrated": calibrated_color,
                 "color_decode_method": color_decode_method,
+                "char_decode_method": char_decode_method,
                 "pattern_prior_weight": pattern_prior_weight,
                 "pattern_confidence_weight": pattern_confidence_weight,
+                "char_prior_weight": char_prior_weight,
                 "pred_red_count_calibrated": calibrated_red_count,
                 "pred_label_argmax": pred_final[row_index],
                 "pred_label_threshold": pred_threshold_final[row_index],
                 "pred_label_pattern_prior": pred_pattern_final[row_index],
+                "pred_label_char_prior": pred_char_prior_final[row_index],
                 "pred_label_calibrated": pred_calibrated_final[row_index],
                 "pred_label_color_oracle": pred_color_oracle_final[row_index],
                 "pred_label_char_oracle": pred_char_oracle_final[row_index],
                 "argmax_correct": pred_final[row_index] == target_final[row_index],
                 "threshold_correct": pred_threshold_final[row_index] == target_final[row_index],
                 "pattern_prior_correct": pred_pattern_final[row_index] == target_final[row_index],
+                "char_prior_correct": pred_char_prior_final[row_index] == target_final[row_index],
                 "calibrated_correct": pred_calibrated_final[row_index] == target_final[row_index],
                 "color_oracle_correct": pred_color_oracle_final[row_index] == target_final[row_index],
                 "char_oracle_correct": pred_char_oracle_final[row_index] == target_final[row_index],
                 "calibrated_length_correct": len(pred_calibrated_final[row_index]) == len(target_final[row_index]),
                 "char_all_correct": pred_all_label == target_all_label,
+                "char_all_calibrated_correct": pred_all_label_calibrated == target_all_label,
                 "color_argmax_correct": pred_color == target_color,
                 "color_threshold_correct": threshold_color == target_color,
                 "color_pattern_prior_correct": pattern_color == target_color,
@@ -1254,7 +1369,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
 
     train_augment = config.use_augmentation and not config.debug_overfit
     balanced_sampler_enabled = config.use_balanced_sampler and not config.debug_overfit
+    char_prior_enabled = config.use_char_prior and not config.debug_overfit
     pattern_prior_enabled = config.use_pattern_prior and not config.debug_overfit
+    char_log_priors: list[list[float]] = []
+    if char_prior_enabled:
+        char_log_priors = build_char_position_prior(train_split)
     pattern_candidates: list[str] = []
     pattern_log_priors: list[float] = []
     if pattern_prior_enabled:
@@ -1366,6 +1485,13 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     else:
         print(f"Char class weights: per-slot {summarize_weight_tensor(char_class_weights)}")
     print(f"Slot pooling: {config.slot_pooling} | slot_context: {'on' if config.use_slot_context else 'off'}")
+    if char_prior_enabled:
+        print(
+            "Char position prior: "
+            f"on weights={','.join(f'{weight:g}' for weight in config.char_prior_weights)}"
+        )
+    else:
+        print("Char position prior: off")
     print(f"EMA: {'on' if ema is not None else 'off'}" + (f" decay={config.ema_decay:.5f}" if ema else ""))
     print(f"TTA shifts: {','.join(str(item) for item in eval_tta_shifts)}")
     print(f"TTA scales: {','.join(f'{item:g}' for item in eval_tta_scales)}")
@@ -1412,6 +1538,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             tta_shifts=eval_tta_shifts,
             tta_scales=eval_tta_scales,
             tta_fill_value=tta_fill_value,
+            char_log_priors=char_log_priors,
+            char_prior_weights=config.char_prior_weights,
             pattern_candidates=pattern_candidates,
             pattern_log_priors=pattern_log_priors,
             pattern_prior_weights=config.pattern_prior_weights,
@@ -1432,6 +1560,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     tta_shifts=eval_tta_shifts,
                     tta_scales=eval_tta_scales,
                     tta_fill_value=tta_fill_value,
+                    char_log_priors=char_log_priors,
+                    char_prior_weights=config.char_prior_weights,
                     pattern_candidates=pattern_candidates,
                     pattern_log_priors=pattern_log_priors,
                     pattern_prior_weights=config.pattern_prior_weights,
@@ -1454,6 +1584,8 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"pattern_final_exact_acc={eval_metrics['pattern_final_exact_acc']:.4f} "
             f"pattern_prior_weight={eval_metrics['pattern_prior_weight']:.2f} "
             f"pattern_confidence_weight={eval_metrics['pattern_confidence_weight']:.2f} "
+            f"char_prior_weight={eval_metrics['char_prior_weight']:.2f} "
+            f"char_decode={eval_metrics['char_decode_method']} "
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
             f"char_sequence_acc={eval_metrics['char_sequence_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
@@ -1517,6 +1649,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "input_std": input_std,
                     "tta_fill_value": tta_fill_value,
                     "color_decode_method": eval_metrics["color_decode_method"],
+                    "char_decode_method": eval_metrics["char_decode_method"],
+                    "char_log_priors": char_log_priors,
+                    "char_prior_weight": eval_metrics["char_prior_weight"],
                     "color_pattern_candidates": pattern_candidates,
                     "color_pattern_log_priors": pattern_log_priors,
                     "pattern_prior_weight": eval_metrics["pattern_prior_weight"],
@@ -1562,6 +1697,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         )
     )
     model.color_decode_method = str(checkpoint.get("color_decode_method", model.best_metrics.get("color_decode_method", "threshold")))
+    model.char_decode_method = str(checkpoint.get("char_decode_method", model.best_metrics.get("char_decode_method", "argmax")))
+    model.char_log_priors = tuple(tuple(float(value) for value in row) for row in checkpoint.get("char_log_priors", ()))
+    model.char_prior_weight = float(checkpoint.get("char_prior_weight", model.best_metrics.get("char_prior_weight", 0.0)))
     model.color_pattern_candidates = tuple(checkpoint.get("color_pattern_candidates", ()))
     model.color_pattern_log_priors = tuple(float(item) for item in checkpoint.get("color_pattern_log_priors", ()))
     model.pattern_prior_weight = float(checkpoint.get("pattern_prior_weight", model.best_metrics.get("pattern_prior_weight", 0.0)))
@@ -1588,6 +1726,9 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             tta_scales=model.tta_scales,
             tta_fill_value=model.tta_fill_value,
             color_decode_method=model.color_decode_method,
+            char_decode_method=model.char_decode_method,
+            char_log_priors=model.char_log_priors,
+            char_prior_weight=model.char_prior_weight,
             color_pattern_candidates=model.color_pattern_candidates,
             color_pattern_log_priors=model.color_pattern_log_priors,
             pattern_prior_weight=model.pattern_prior_weight,
@@ -1625,6 +1766,9 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
         )
     )
     color_decode_method = str(getattr(model, "color_decode_method", "threshold"))
+    char_decode_method = str(getattr(model, "char_decode_method", "argmax"))
+    char_log_priors = tuple(tuple(float(value) for value in row) for row in getattr(model, "char_log_priors", ()))
+    char_prior_weight = float(getattr(model, "char_prior_weight", 0.0))
     color_pattern_candidates = tuple(getattr(model, "color_pattern_candidates", ()))
     color_pattern_log_priors = tuple(getattr(model, "color_pattern_log_priors", ()))
     pattern_prior_weight = float(getattr(model, "pattern_prior_weight", 0.0))
@@ -1641,6 +1785,10 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
         )
     else:
         print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
+    if char_decode_method == "char_prior" and char_log_priors:
+        print(f"Using character position prior for test decoding (weight={char_prior_weight:.2f})")
+    else:
+        print("Using argmax character decoding for test decoding")
     print(
         f"Using input normalization {input_normalization} "
         f"(mean={input_mean:.4f}, std={input_std:.4f}) for test decoding"
@@ -1656,7 +1804,11 @@ def predict_test(model: BaselineCNN, test_df: pd.DataFrame, config: Optional[Tra
             tta_scales,
             fill_value=tta_fill_value,
         )
-        pred_chars = char_logits.argmax(dim=-1)
+        pred_chars = apply_char_prior(
+            char_logits,
+            char_log_priors=char_log_priors,
+            prior_weight=char_prior_weight if char_decode_method == "char_prior" else 0.0,
+        )
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         char_confidence = torch.softmax(char_logits, dim=-1).max(dim=-1).values
         if use_pattern_prior:

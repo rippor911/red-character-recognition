@@ -76,6 +76,7 @@ tta=on
 tta_shifts=0,-2,2
 tta_scales=1,0.95,1.05
 balanced_sampler=on, by color pattern
+char_prior_weights=0,0.1,0.25,0.5,1
 pattern_confidence_weights=0,0.25,0.5,1
 ```
 
@@ -153,14 +154,19 @@ threshold_color_acc
 pattern_final_exact_acc
 calibrated_final_exact_acc
 calibrated_color_pattern_acc
+calibrated_char_slot_acc
 calibrated_length_acc
 char_sequence_acc
 char_oracle_final_exact_acc
 color_oracle_final_exact_acc
 color_decode_method
+char_decode_method
 color_thresholds
+char_prior_weight
 pattern_prior_weight
 pattern_confidence_weight
+char_prior_final_exact_acc
+char_prior_slot_acc
 char_slot_acc
 color_slot_acc
 color_pattern_acc
@@ -174,13 +180,13 @@ calibrated_final_exact_acc_pattern_<color>
 
 最终答案解码逻辑：
 
-1. 字符取 `char_logits.argmax(dim=-1)`；
+1. 字符默认取 `char_logits.argmax(dim=-1)`；
 2. 颜色取 `color_logits.argmax(dim=-1)`；
 3. 只保留预测为红色的位置；
 4. 从左到右拼接对应字符；
 5. 如果没有任何红色预测，则选择红色 logit 最高的位置，避免空答案。
 
-`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，并保存最佳 `color_thresholds` 到 checkpoint。训练还会从训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，并额外扫描 `pattern_confidence_weight`，用字符分类头的 slot 置信度辅助选择更可信的红色模式，得到 `pattern_final_exact_acc`。最终 checkpoint 和测试推理使用 `calibrated_final_exact_acc` 对应的更优解码方式；如果模式先验或置信度辅助没有带来收益，则退回每个位置阈值解码。
+`final_exact_acc` 使用上述 argmax 颜色解码；`threshold_final_exact_acc` 会在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，并保存最佳 `color_thresholds` 到 checkpoint。训练还会从训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，并额外扫描 `pattern_confidence_weight`，用字符分类头的 slot 置信度辅助选择更可信的红色模式，得到 `pattern_final_exact_acc`。颜色校准后，还会只用训练子集统计 5 个位置各自的字符先验，在验证集上扫描 `char_prior_weight`；只有它提升 `calibrated_final_exact_acc` 时才保存为 `char_prior` 解码。最终 checkpoint 和测试推理使用 `calibrated_final_exact_acc` 对应的更优解码方式；如果颜色模式先验、置信度辅助或字符先验没有带来收益，则退回阈值颜色解码和 argmax 字符解码。
 
 训练结束后默认保存验证集诊断文件：
 
@@ -189,7 +195,7 @@ outputs/val_predictions.csv
 outputs/val_errors.csv
 ```
 
-其中包含每张验证图的目标标签、预测标签、argmax/阈值/模式先验或置信度辅助模式/最终校准颜色模式、颜色 oracle 标签、字符 oracle 标签、红色概率、红色数量、字符置信度以及最终采用的解码参数。若只想训练不导出诊断，可加 `--no-val-diagnostics`；错误样本数量可用 `--max-error-samples` 控制。
+其中包含每张验证图的目标标签、预测标签、argmax/阈值/模式先验或置信度辅助模式/最终校准颜色模式、字符先验标签、颜色 oracle 标签、字符 oracle 标签、红色概率、红色数量、字符置信度以及最终采用的解码参数。若只想训练不导出诊断，可加 `--no-val-diagnostics`；错误样本数量可用 `--max-error-samples` 控制。
 
 ## 提交文件校验
 
@@ -234,18 +240,20 @@ Dropout: 0.100 | label_smoothing: 0.030 | scheduler: warmup+cosine warmup_epochs
 Color class weights: per-slot shape=(5, 2) min=0.3636 max=1.6364 mean=1.0000 r_by_slot=1.091,0.727,1.455,0.909,1.636
 Char class weights: per-slot shape=(5, 36) min=0.3770 max=1.1429 mean=1.0000
 Slot pooling: avgmax | slot_context: on
+Char position prior: on weights=0,0.1,0.25,0.5,1
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
 TTA scales: 1,0.95,1.05
 Balanced sampler: on color_patterns=rruuu:3, ururu:3, ruruu:1, uurru:1, uuurr:1
 Color pattern prior: on candidates=5 weights=0,0.25,0.5,1,1.5,2 confidence_weights=0,0.25,0.5,1 top=rruuu:0.286, ururu:0.286, ruruu:0.143, uurru:0.143, uuurr:0.143
 Model parameters: 1,909,038
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3416 val_loss=4.0800 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_slot_acc=0.0000 char_sequence_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=0.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3416 val_loss=4.0800 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_prior_weight=0.00 char_decode=argmax char_slot_acc=0.0000 char_sequence_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=0.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
 Saved val_errors.csv
 Using color thresholds 0.500,0.500,0.500,0.500,0.500 for test decoding
+Using argmax character decoding for test decoding
 Using input normalization dataset (mean=0.xxxx, std=0.xxxx) for test decoding
 Using TTA shifts 0,-2,2 for test decoding
 Using TTA scales 1,0.95,1.05 for test decoding
@@ -269,14 +277,15 @@ Dropout: 0.000 | label_smoothing: 0.000 | scheduler: off
 Color class weights: off
 Char class weights: off
 Slot pooling: avgmax | slot_context: on
+Char position prior: off
 EMA: off
 TTA shifts: 0
 TTA scales: 1
 Balanced sampler: off
 Color pattern prior: off
-Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1810 debug_train_loss=3.7732 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_slot_acc=0.1250 char_sequence_acc=0.0000 color_slot_acc=0.9250 color_pattern_acc=0.6250 char_oracle_final_exact_acc=0.6250 color_oracle_final_exact_acc=0.0000 calibrated_gain=0.0000
+Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1810 debug_train_loss=3.7732 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_prior_weight=0.00 char_decode=argmax char_slot_acc=0.1250 char_sequence_acc=0.0000 color_slot_acc=0.9250 color_pattern_acc=0.6250 char_oracle_final_exact_acc=0.6250 color_oracle_final_exact_acc=0.0000 calibrated_gain=0.0000
 ...
-Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.1044 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 calibrated_final_exact_acc=1.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=1.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_slot_acc=0.9750 char_sequence_acc=0.8750 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=1.0000 calibrated_gain=0.0000
+Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.1044 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 calibrated_final_exact_acc=1.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=1.0000 pattern_prior_weight=0.00 pattern_confidence_weight=0.00 char_prior_weight=0.00 char_decode=argmax char_slot_acc=0.9750 char_sequence_acc=0.8750 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=1.0000 calibrated_gain=0.0000
 Saved debug_train_predictions.csv
 Saved debug_train_errors.csv
 ```
