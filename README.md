@@ -59,6 +59,7 @@ color_class_weight=on
 max_color_class_weight=3.0
 feature_dim=384
 head_hidden_dim=384
+position_specific_heads=on
 train_augmentation=on
 cosine_scheduler=on
 amp=cuda only
@@ -99,9 +100,9 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 -> 小型 CNN 特征提取
 -> AdaptiveAvgPool2d((1, 5))
 -> 5 个位置的 384 维 slot feature
--> 字符分类头 Linear(..., 36)
+-> 位置专用字符分类头 Linear(..., 36)
 -> 颜色统计分支提取每个 slot 的 RGB 均值和 red-minus-other 均值/最大值
--> 颜色分类头 Linear(..., 2)
+-> 位置专用颜色分类头 Linear(..., 2)
 ```
 
 统一接口：
@@ -127,7 +128,7 @@ loss = char_loss + color_loss
 
 两个任务权重均为 1。
 
-正式训练默认对字符分类使用 `label_smoothing=0.03`，对颜色分类按训练子集里的 `u/r` 位置比例自动计算类别权重，并维护 EMA 权重；验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。每个 epoch 会同时评估 raw/EMA，保存 `threshold_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、颜色类别权重、dropout、scheduler、EMA、TTA 和数据增强，便于检查小样本记忆能力。
+正式训练默认对字符分类使用 `label_smoothing=0.03`，对颜色分类按训练子集里的 `u/r` 位置比例自动计算类别权重，并维护 EMA 权重；验证和测试默认使用确定性水平平移 TTA，平均 `0,-2,2` 三个视图的 logits。分类头默认按 5 个位置分别建模，可加 `--shared-heads` 切回共享 head 做对照。每个 epoch 会同时评估 raw/EMA，保存 `threshold_final_exact_acc` 更高的版本。评估指标仍使用普通交叉熵和准确率，便于横向比较。`--debug-overfit` 会自动关闭 label smoothing、颜色类别权重、dropout、scheduler、EMA、TTA 和数据增强，便于检查小样本记忆能力。
 
 ## 验证指标
 
@@ -204,8 +205,8 @@ Dropout: 0.100 | label_smoothing: 0.030 | scheduler: on
 Color class weights: u=0.8000 r=1.2000
 EMA: on decay=0.99900
 TTA shifts: 0,-2,2
-Model parameters: 511,894
-Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.1782 val_loss=3.9389 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0400 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
+Model parameters: 1,462,062
+Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.2598 val_loss=3.9604 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.0400 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000 raw_threshold_final_exact_acc=0.0000 ema_threshold_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
 Saved val_predictions.csv
@@ -231,9 +232,9 @@ Dropout: 0.000 | label_smoothing: 0.000 | scheduler: off
 Color class weights: off
 EMA: off
 TTA shifts: 0
-Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.0579 debug_train_loss=3.6255 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 color_threshold=0.500 char_slot_acc=0.1000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
+Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1910 debug_train_loss=3.6281 final_exact_acc=0.1250 threshold_final_exact_acc=0.1250 color_threshold=0.500 char_slot_acc=0.1500 color_slot_acc=0.9000 color_pattern_acc=0.5000 threshold_gain=0.0000
 ...
-Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0005 debug_train_loss=0.0022 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 color_threshold=0.500 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
+Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.0019 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 color_threshold=0.500 char_slot_acc=1.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 threshold_gain=0.0000
 Saved debug_train_predictions.csv
 Saved debug_train_errors.csv
 ```

@@ -51,6 +51,7 @@ class TrainConfig:
     feature_dim: int = 384
     dropout: float = 0.1
     head_hidden_dim: int = 384
+    position_specific_heads: bool = True
     use_augmentation: bool = True
     use_amp: bool = True
     use_scheduler: bool = True
@@ -93,6 +94,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--feature-dim", type=int, default=384)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--head-hidden-dim", type=int, default=384)
+    parser.add_argument("--shared-heads", action="store_true")
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--no-scheduler", action="store_true")
@@ -132,6 +134,7 @@ def parse_args() -> TrainConfig:
         feature_dim=args.feature_dim,
         dropout=args.dropout,
         head_hidden_dim=args.head_hidden_dim,
+        position_specific_heads=not args.shared_heads,
         use_augmentation=not args.no_augment,
         use_amp=not args.no_amp,
         use_scheduler=not args.no_scheduler,
@@ -687,6 +690,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         feature_dim=config.feature_dim,
         dropout=model_dropout,
         head_hidden_dim=config.head_hidden_dim,
+        position_specific_heads=config.position_specific_heads,
     ).to(device)
     model.image_size = config.image_size
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate, weight_decay=config.weight_decay)
@@ -816,6 +820,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                         "feature_dim": config.feature_dim,
                         "head_hidden_dim": config.head_hidden_dim,
                         "num_chars": len(CHARSET),
+                        "position_specific_heads": config.position_specific_heads,
                     },
                     "metrics": best_metrics,
                     "color_threshold": eval_metrics["color_threshold"],
