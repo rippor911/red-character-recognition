@@ -46,15 +46,15 @@ python src/main.py
 当前最佳实验配置：
 
 ```bash
-python src/main.py --model convnext_tiny --slot-extractor pool --normalization imagenet --image-height 96 --image-width 320 --learning-rate 2e-4 --epochs 6 --batch-size 32
+python src/main.py --model convnext_tiny --slot-extractor pool --normalization imagenet --image-height 128 --image-width 384 --learning-rate 1.5e-4 --epochs 4 --batch-size 24
 ```
 
 当前最佳验证结果记录在 [docs/experiment_log.md](docs/experiment_log.md)：
 
 ```text
 BaselineCNN E5 calibrated_final_exact_acc=0.9188
-ConvNeXt-Tiny pool E6 calibrated_final_exact_acc=0.9780
-relative_error_reduction=72.9%
+ConvNeXt-Tiny high-res pool E4 calibrated_final_exact_acc=0.9820
+relative_error_reduction=77.8%
 ```
 
 使用已经保存的最佳 checkpoint 直接生成提交文件：

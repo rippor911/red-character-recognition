@@ -153,6 +153,99 @@ absolute_gain=+0.0592
 relative_error_reduction=72.9%
 ```
 
+## 2026-06-19 ConvNeXt-Tiny High-Resolution Pool E4
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_pool_128x384_e4 \
+  --checkpoint-dir checkpoints/convnext_pool_128x384_e4 \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 128 \
+  --image-width 384 \
+  --learning-rate 1.5e-4 \
+  --epochs 4 \
+  --batch-size 24 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Best validation result:
+
+```text
+best_epoch=4
+selected_model=ema
+val_loss=0.0484169374
+final_exact_acc=0.9808
+calibrated_final_exact_acc=0.9820
+char_slot_acc=0.99100
+char_sequence_acc=0.9558
+color_slot_acc=0.99932
+color_pattern_acc=0.9968
+calibrated_color_pattern_acc=0.9980
+calibrated_length_acc=0.9980
+char_oracle_final_exact_acc=0.9980
+color_oracle_final_exact_acc=0.9840
+char_decode_method=argmax
+char_prior_weight=0.00
+color_decode_method=threshold
+color_thresholds=0.500,0.800,0.800,0.500,0.950
+```
+
+Learning curve:
+
+```text
+epoch 1: calibrated_final_exact_acc=0.9492
+epoch 2: calibrated_final_exact_acc=0.9704
+epoch 3: calibrated_final_exact_acc=0.9796
+epoch 4: calibrated_final_exact_acc=0.9820
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_pool_E6_96x320=0.9780
+ConvNeXt_pool_E4_128x384=0.9820
+gain_vs_baseline=+0.0632
+gain_vs_previous_best=+0.0040
+baseline_error=0.0812
+highres_error=0.0180
+relative_error_reduction_vs_baseline=(0.0812 - 0.0180) / 0.0812 = 77.8%
+```
+
+Takeaways:
+
+- Higher feature resolution gives a measurable gain over 96x320.
+- Batch size 24 fits RTX 4060 Laptop GPU with roughly 5GB memory used.
+- The remaining errors are now close to the oracle limits from character and color branches.
+
+Artifacts:
+
+```text
+checkpoints/convnext_pool_128x384_e4/baseline_best.pt
+outputs/convnext_pool_128x384_e4/training_history.csv
+outputs/convnext_pool_128x384_e4/val_predictions.csv
+outputs/convnext_pool_128x384_e4/val_errors.csv
+outputs/convnext_pool_128x384_e4/submission.csv
+```
+
+## Updated Current Best 2
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + 128x384 input
+checkpoint=checkpoints/convnext_pool_128x384_e4/baseline_best.pt
+submission=outputs/convnext_pool_128x384_e4/submission.csv
+calibrated_final_exact_acc=0.9820
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0632
+relative_error_reduction=77.8%
+```
+
 Model:
 
 ```text
