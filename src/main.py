@@ -566,6 +566,7 @@ def evaluate(
     total_by_slot = torch.zeros(5, dtype=torch.long)
     all_pred_chars: list[torch.Tensor] = []
     all_red_probs: list[torch.Tensor] = []
+    all_target_chars: list[torch.Tensor] = []
     all_target_colors: list[torch.Tensor] = []
     all_target_final: list[str] = []
 
@@ -599,11 +600,13 @@ def evaluate(
         total_by_slot[:slot_count] += batch_size
         all_pred_chars.append(pred_chars.detach().cpu())
         all_red_probs.append(red_probs.detach().cpu())
+        all_target_chars.append(char_target.detach().cpu())
         all_target_colors.append(color_target.detach().cpu())
         all_target_final.extend(target_final)
 
     pred_chars_all = torch.cat(all_pred_chars, dim=0)
     red_probs_all = torch.cat(all_red_probs, dim=0)
+    target_chars_all = torch.cat(all_target_chars, dim=0)
     target_colors_all = torch.cat(all_target_colors, dim=0)
     best_threshold = 0.5
     best_threshold_correct = final_correct
@@ -740,6 +743,25 @@ def evaluate(
         for row in target_colors_all.long().tolist()
     ]
     calibrated_pattern_correct = (calibrated_colors == target_colors_all).all(dim=1).sum().item()
+    char_sequence_correct = (pred_chars_all == target_chars_all).all(dim=1).sum().item()
+    color_oracle_final = decode_batch_final(
+        pred_chars_all,
+        target_colors_all,
+        red_scores=None,
+        fallback_if_empty=False,
+    )
+    char_oracle_final = decode_batch_final(
+        target_chars_all,
+        calibrated_colors,
+        red_scores=red_probs_all,
+        fallback_if_empty=True,
+    )
+    color_oracle_correct = sum(
+        pred == target for pred, target in zip(color_oracle_final, all_target_final)
+    )
+    char_oracle_correct = sum(
+        pred == target for pred, target in zip(char_oracle_final, all_target_final)
+    )
 
     metrics = {
         "loss": total_loss / total_samples,
@@ -747,6 +769,7 @@ def evaluate(
         "color_loss": total_color_loss / total_samples,
         "final_exact_acc": final_correct / total_samples,
         "char_slot_acc": char_slot_correct / total_slots,
+        "char_sequence_acc": char_sequence_correct / total_samples,
         "color_slot_acc": color_slot_correct / total_slots,
         "color_pattern_acc": color_pattern_correct / total_samples,
         "target_length_acc": target_length_correct / total_samples,
@@ -758,6 +781,8 @@ def evaluate(
         "pattern_color_acc": best_pattern_color_correct / total_samples,
         "pattern_prior_weight": best_pattern_prior_weight,
         "calibrated_final_exact_acc": calibrated_correct / total_samples,
+        "char_oracle_final_exact_acc": char_oracle_correct / total_samples,
+        "color_oracle_final_exact_acc": color_oracle_correct / total_samples,
         "calibrated_color_pattern_acc": calibrated_pattern_correct / total_samples,
         "calibrated_length_acc": calibrated_length_correct / total_samples,
         "calibrated_gain": (calibrated_correct - final_correct) / total_samples,
@@ -1017,6 +1042,17 @@ def save_validation_diagnostics(
             pred_pattern_final = pred_threshold_final
         calibrated_colors = pattern_colors if use_pattern_prior else threshold_colors
         pred_calibrated_final = pred_pattern_final if use_pattern_prior else pred_threshold_final
+        pred_color_oracle_final = decode_batch_final(
+            pred_chars,
+            color_target,
+            fallback_if_empty=False,
+        )
+        pred_char_oracle_final = decode_batch_final(
+            char_target,
+            calibrated_colors,
+            red_scores=red_probs,
+            fallback_if_empty=True,
+        )
         target_final = decode_batch_final(char_target, color_target, fallback_if_empty=False)
 
         pred_chars_rows = pred_chars.detach().cpu().tolist()
@@ -1055,10 +1091,14 @@ def save_validation_diagnostics(
                 "pred_label_threshold": pred_threshold_final[row_index],
                 "pred_label_pattern_prior": pred_pattern_final[row_index],
                 "pred_label_calibrated": pred_calibrated_final[row_index],
+                "pred_label_color_oracle": pred_color_oracle_final[row_index],
+                "pred_label_char_oracle": pred_char_oracle_final[row_index],
                 "argmax_correct": pred_final[row_index] == target_final[row_index],
                 "threshold_correct": pred_threshold_final[row_index] == target_final[row_index],
                 "pattern_prior_correct": pred_pattern_final[row_index] == target_final[row_index],
                 "calibrated_correct": pred_calibrated_final[row_index] == target_final[row_index],
+                "color_oracle_correct": pred_color_oracle_final[row_index] == target_final[row_index],
+                "char_oracle_correct": pred_char_oracle_final[row_index] == target_final[row_index],
                 "calibrated_length_correct": len(pred_calibrated_final[row_index]) == len(target_final[row_index]),
                 "char_all_correct": pred_all_label == target_all_label,
                 "color_argmax_correct": pred_color == target_color,
@@ -1279,8 +1319,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             f"pattern_final_exact_acc={eval_metrics['pattern_final_exact_acc']:.4f} "
             f"pattern_prior_weight={eval_metrics['pattern_prior_weight']:.2f} "
             f"char_slot_acc={eval_metrics['char_slot_acc']:.4f} "
+            f"char_sequence_acc={eval_metrics['char_sequence_acc']:.4f} "
             f"color_slot_acc={eval_metrics['color_slot_acc']:.4f} "
             f"color_pattern_acc={eval_metrics['color_pattern_acc']:.4f} "
+            f"char_oracle_final_exact_acc={eval_metrics['char_oracle_final_exact_acc']:.4f} "
+            f"color_oracle_final_exact_acc={eval_metrics['color_oracle_final_exact_acc']:.4f} "
             f"calibrated_color_pattern_acc={eval_metrics['calibrated_color_pattern_acc']:.4f} "
             f"calibrated_length_acc={eval_metrics['calibrated_length_acc']:.4f} "
             f"calibrated_gain={eval_metrics['calibrated_gain']:.4f}"
