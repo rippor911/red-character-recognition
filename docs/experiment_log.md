@@ -702,3 +702,120 @@ python -u src/main.py \
   --num-workers 2 \
   --device cuda
 ```
+
+## 2026-06-19 ConvNeXt-Tiny High-Resolution Fine-Tune E2
+
+Motivation:
+
+- The 128x384 high-resolution run improved exact accuracy to 0.9820.
+- Most remaining validation errors are character confusions rather than color pattern mistakes.
+- I added `--init-checkpoint` so training can initialize from an existing best checkpoint without switching into eval/predict-only mode.
+
+Implementation:
+
+- Added CLI option `--init-checkpoint`.
+- The training path loads model weights, prior thresholds, image size, normalization and decode prior metadata from the initialization checkpoint.
+- Optimizer, scheduler, EMA and epoch counters still start fresh for the new fine-tuning run.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_highres_ft_e2 \
+  --checkpoint-dir checkpoints/convnext_highres_ft_e2 \
+  --init-checkpoint checkpoints/convnext_pool_128x384_e4/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 128 \
+  --image-width 384 \
+  --learning-rate 5e-5 \
+  --epochs 2 \
+  --batch-size 24 \
+  --num-workers 2 \
+  --device cuda
+```
+
+Best result:
+
+```text
+best_epoch=1
+selected_model=ema
+train_loss=0.2642
+val_loss=0.0485
+final_exact_acc=0.9818
+threshold_final_exact_acc=0.9832
+calibrated_final_exact_acc=0.9832
+char_slot_acc=0.99160
+char_sequence_acc=0.9584
+color_slot_acc=0.99940
+color_pattern_acc=0.9972
+char_oracle_final_exact_acc=0.9986
+color_oracle_final_exact_acc=0.9846
+color_thresholds=0.500,0.800,0.850,0.650,0.950
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_pool_E6_96x320=0.9780
+ConvNeXt_pool_E4_128x384=0.9820
+ConvNeXt_highres_finetune_E1=0.9832
+gain_vs_baseline=+0.0644
+gain_vs_previous_best=+0.0012
+baseline_error=0.0812
+finetune_error=0.0168
+relative_error_reduction_vs_baseline=(0.0812 - 0.0168) / 0.0812 = 79.3%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Takeaways:
+
+- Low-learning-rate fine-tuning from the high-resolution checkpoint is a small but real positive step.
+- The improvement mostly comes from character accuracy: `char_slot_acc` rose from 0.99100 to 0.99160.
+- Color recognition is already near saturation, so the next experiments should focus more loss/augmentation capacity on confusing character pairs.
+
+Artifacts:
+
+```text
+checkpoints/convnext_highres_ft_e2/baseline_best.pt
+outputs/convnext_highres_ft_e2/training_history.csv
+outputs/convnext_highres_ft_e2/val_predictions.csv
+outputs/convnext_highres_ft_e2/val_errors.csv
+outputs/convnext_highres_ft_e2/submission.csv
+```
+
+## Updated Current Best 3
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + 128x384 input + checkpoint fine-tuning
+checkpoint=checkpoints/convnext_highres_ft_e2/baseline_best.pt
+submission=outputs/convnext_highres_ft_e2/submission.csv
+calibrated_final_exact_acc=0.9832
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0644
+relative_error_reduction=79.3%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_highres_ft_e2 \
+  --checkpoint-dir checkpoints/convnext_highres_ft_e2 \
+  --init-checkpoint checkpoints/convnext_pool_128x384_e4/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 128 \
+  --image-width 384 \
+  --learning-rate 5e-5 \
+  --epochs 2 \
+  --batch-size 24 \
+  --num-workers 2 \
+  --device cuda
+```
