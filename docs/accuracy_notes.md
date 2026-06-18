@@ -37,7 +37,7 @@ stretch target: final_exact_acc 接近 0.98-0.99
 当前实现仍保持“无预训练、无 Transformer、无 CTC、无集成”的约束，主要增强点是：
 
 1. 更稳的轻量 CNN：使用 depthwise separable block、slot pooling、slot 位置嵌入和 MLP 分类头；默认 `feature_dim/head_hidden_dim=384`，并为 5 个位置使用位置专用分类头，整体仍保持约 146 万参数的轻量规模。
-2. 颜色专用统计分支：每个 slot 额外提取 RGB 均值以及 `red - max(green, blue)` 的均值/最大值，降低颜色判定对深层字符特征的依赖。
+2. 颜色专用统计分支：每个 slot 额外提取 RGB 均值、`red - max(green, blue)` 的均值/最大值、正向红色响应和红色覆盖率；新增覆盖特征经零初始化投影接入，降低对既有字符分支初始化的扰动。
 3. 训练策略：轻量几何/亮度增强、AdamW、label smoothing、按位置统计的字符/颜色类别权重、按颜色模式均衡采样、warmup+cosine scheduler、AMP、梯度裁剪、EMA 权重滑动平均和确定性位移+尺度 TTA。
 4. 验证集阈值校准：保留原始 `final_exact_acc`，同时在验证集上先扫描全局红色概率阈值，再贪心校准 5 个位置各自的红色阈值，记录 `threshold_final_exact_acc` 和 `color_thresholds`。
 5. 训练集颜色模式先验：只用训练子集统计非空 `r/u` 颜色模式，在验证集上扫描 `pattern_prior_weight`，记录 `pattern_final_exact_acc`；最终 checkpoint 按 `calibrated_final_exact_acc` 选择阈值解码或模式先验解码，不读取或人工修改测试标签。

@@ -106,7 +106,7 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 -> AdaptiveAvgPool2d((1, 5))
 -> 5 个位置的 384 维 slot feature
 -> 位置专用字符分类头 Linear(..., 36)
--> 颜色统计分支提取每个 slot 的 RGB 均值和 red-minus-other 均值/最大值
+-> 颜色统计分支提取每个 slot 的 RGB 均值、red-minus-other 均值/最大值、正向红色响应和红色覆盖率
 -> 位置专用颜色分类头 Linear(..., 2)
 ```
 
@@ -226,7 +226,7 @@ TTA shifts: 0,-2,2
 TTA scales: 1,0.95,1.05
 Balanced sampler: on color_patterns=rruuu:3, ururu:3, ruruu:1, uurru:1, uuurr:1
 Color pattern prior: on candidates=5 weights=0,0.25,0.5,1,1.5,2 top=rruuu:0.286, ururu:0.286, ruruu:0.143, uurru:0.143, uuurr:0.143
-Model parameters: 1,462,062
+Model parameters: 1,462,830
 Epoch 01/1 lr=1.00e-03 selected=raw train_loss=4.3416 val_loss=4.0800 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.0000 char_sequence_acc=0.0000 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=0.0000 calibrated_color_pattern_acc=1.0000 calibrated_length_acc=1.0000 calibrated_gain=0.0000 raw_calibrated_final_exact_acc=0.0000 ema_calibrated_final_exact_acc=0.0000
 Saved best raw checkpoint
 Saved training_history.csv
@@ -260,7 +260,7 @@ Balanced sampler: off
 Color pattern prior: off
 Epoch 01/30 lr=1.00e-03 selected=raw train_loss=4.1810 debug_train_loss=3.7732 final_exact_acc=0.0000 threshold_final_exact_acc=0.0000 calibrated_final_exact_acc=0.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=0.0000 pattern_prior_weight=0.00 char_slot_acc=0.1250 char_sequence_acc=0.0000 color_slot_acc=0.9250 color_pattern_acc=0.6250 char_oracle_final_exact_acc=0.6250 color_oracle_final_exact_acc=0.0000 calibrated_gain=0.0000
 ...
-Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.1021 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 calibrated_final_exact_acc=1.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=1.0000 pattern_prior_weight=0.00 char_slot_acc=0.9750 char_sequence_acc=0.8750 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=1.0000 calibrated_gain=0.0000
+Epoch 30/30 lr=1.00e-03 selected=raw train_loss=0.0002 debug_train_loss=0.1044 final_exact_acc=1.0000 threshold_final_exact_acc=1.0000 calibrated_final_exact_acc=1.0000 decode=threshold color_thresholds=0.500,0.500,0.500,0.500,0.500 pattern_final_exact_acc=1.0000 pattern_prior_weight=0.00 char_slot_acc=0.9750 char_sequence_acc=0.8750 color_slot_acc=1.0000 color_pattern_acc=1.0000 char_oracle_final_exact_acc=1.0000 color_oracle_final_exact_acc=1.0000 calibrated_gain=0.0000
 Saved debug_train_predictions.csv
 Saved debug_train_errors.csv
 ```

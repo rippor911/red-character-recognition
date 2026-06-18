@@ -104,6 +104,8 @@ class BaselineCNN(nn.Module):
         else:
             self.char_head = SlotHead(feature_dim, head_hidden_dim, num_chars, dropout)
             self.color_head = SlotHead(feature_dim, head_hidden_dim // 2, 2, dropout)
+        self.extra_color_stat_proj = nn.Linear(2, feature_dim, bias=False)
+        nn.init.zeros_(self.extra_color_stat_proj.weight)
 
     def apply_slot_heads(
         self,
@@ -124,8 +126,12 @@ class BaselineCNN(nn.Module):
         red_minus_other = images[:, 0:1] - torch.maximum(images[:, 1:2], images[:, 2:3])
         red_avg = self.red_slot_avg_pool(red_minus_other).squeeze(2).permute(0, 2, 1).contiguous()
         red_max = self.red_slot_max_pool(red_minus_other).squeeze(2).permute(0, 2, 1).contiguous()
+        red_positive = red_minus_other.clamp_min(0.0)
+        red_positive_avg = self.red_slot_avg_pool(red_positive).squeeze(2).permute(0, 2, 1).contiguous()
+        red_coverage = self.red_slot_avg_pool((red_minus_other > 0.15).to(images.dtype)).squeeze(2).permute(0, 2, 1).contiguous()
         color_stats = torch.cat([raw_slots, red_avg, red_max], dim=-1)
-        color_features = slot_features + self.color_stat_proj(color_stats)
+        extra_color_stats = torch.cat([red_positive_avg, red_coverage], dim=-1)
+        color_features = slot_features + self.color_stat_proj(color_stats) + self.extra_color_stat_proj(extra_color_stats)
         if self.position_specific_heads:
             char_logits = self.apply_slot_heads(slot_features, self.char_heads)
             color_logits = self.apply_slot_heads(color_features, self.color_heads)
