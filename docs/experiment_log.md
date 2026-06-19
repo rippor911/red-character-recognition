@@ -3232,3 +3232,136 @@ outputs/confusion_rule_robustness_audit/learned_rules_aggressive_A.csv
 outputs/confusion_rule_robustness_audit/learned_rules_aggressive_B.csv
 ```
 
+## 2026-06-20 Dense TTA Audit On Best ConvNeXt
+
+Purpose:
+
+- Check whether a denser test-time augmentation grid can improve the current best pure model before adding more learned components.
+- This isolates inference-time averaging from additional validation-tuned correction rules.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs\convnext_best_dense_tta_eval \
+  --checkpoint-dir checkpoints\convnext_192x576_pool_query_lr2e6_e1 \
+  --checkpoint-path checkpoints\convnext_192x576_pool_query_lr2e6_e1\baseline_best.pt \
+  --eval-checkpoint \
+  --skip-test \
+  --device cuda \
+  --batch-size 8 \
+  --num-workers 2 \
+  --threshold-min 0.05 \
+  --threshold-max 0.99 \
+  --threshold-steps 95 \
+  --tta-shifts "0,-1,1,-2,2,-3,3" \
+  --tta-scales "1,0.97,1.03,0.95,1.05"
+```
+
+Result:
+
+```text
+final_exact_acc=0.9856
+threshold_final_exact_acc=0.9874
+calibrated_final_exact_acc=0.9874
+char_slot_acc=0.99348
+char_sequence_acc=0.96760
+color_slot_acc=0.99932
+color_pattern_acc=0.99680
+char_oracle_final_exact_acc=0.99880
+color_oracle_final_exact_acc=0.98860
+```
+
+Conclusion:
+
+- Dense TTA did not improve over the previous best pure model score of 0.9874.
+- The remaining pure-model gap is character recognition, not color decoding, because `color_pattern_acc` is already 0.9968 while `char_sequence_acc` is 0.9676.
+- No canonical submission update was made from this run.
+
+Artifacts:
+
+```text
+outputs/convnext_best_dense_tta_eval/val_checkpoint_metrics.csv
+outputs/convnext_best_dense_tta_eval/val_checkpoint_predictions.csv
+outputs/convnext_best_dense_tta_eval/val_checkpoint_errors.csv
+logs/convnext_best_dense_tta_eval.out.log
+logs/convnext_best_dense_tta_eval.err.log
+```
+
+## 2026-06-20 Slot-Crop Specialist Long Continuation
+
+Purpose:
+
+- Continue the slot-crop ConvNeXt tiny specialist from its previous best checkpoint.
+- Test whether lower learning-rate continuation can turn it into a useful character-specialist model for later ensemble or distillation work.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs\slot_crop_192x576_lr2e5_e8 \
+  --checkpoint-dir checkpoints\slot_crop_192x576_lr2e5_e8 \
+  --init-checkpoint checkpoints\slot_crop_192x576_lr5e5_e3\baseline_best.pt \
+  --model slot_crop_convnext_tiny \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 2e-5 \
+  --epochs 8 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
+Best epoch:
+
+```text
+epoch=6
+val_final_exact_acc=0.9746
+val_threshold_final_exact_acc=0.9756
+val_calibrated_final_exact_acc=0.9756
+val_char_slot_acc=0.98736
+val_char_sequence_acc=0.93800
+val_color_slot_acc=0.99932
+val_color_pattern_acc=0.99680
+val_char_oracle_final_exact_acc=0.99780
+val_color_oracle_final_exact_acc=0.97780
+```
+
+Conclusion:
+
+- The specialist improved from the previous slot-crop continuation score of 0.9706 to 0.9756, but it remains far below the whole-image ConvNeXt checkpoint at 0.9874.
+- The slot-crop model is not a candidate to replace the canonical submission.
+- Its current value is as a source of complementary predictions for weighted ensemble analysis; this needs a shared-logit or prediction-level ensembling path because the existing logit ensemble requires identical image geometry.
+
+Submission validation:
+
+```text
+path=outputs/slot_crop_192x576_lr2e5_e8/submission.csv
+rows=5000
+unique_ids=5000
+bad_labels=0
+contains_label_NA=3
+```
+
+Note:
+
+- `NA` is a legal two-character label under the `0-9A-Z` alphabet. CSV validation should read submissions with `keep_default_na=False` when checking labels with pandas.
+
+Artifacts:
+
+```text
+checkpoints/slot_crop_192x576_lr2e5_e8/baseline_best.pt
+outputs/slot_crop_192x576_lr2e5_e8/training_history.csv
+outputs/slot_crop_192x576_lr2e5_e8/val_predictions.csv
+outputs/slot_crop_192x576_lr2e5_e8/val_errors.csv
+outputs/slot_crop_192x576_lr2e5_e8/submission.csv
+logs/slot_crop_192x576_lr2e5_e8.out.log
+logs/slot_crop_192x576_lr2e5_e8.err.log
+```
+
