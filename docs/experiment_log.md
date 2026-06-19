@@ -1845,3 +1845,88 @@ logs/convnext_192x576_pool_query_color1_e1.out.log
 logs/convnext_192x576_pool_query_color1_e1.err.log
 ```
 
+## 2026-06-19 192x576 Pool-Query Char-Loss Rebalance E1
+
+Motivation:
+
+- Remaining errors are still mostly visually similar characters.
+- I increased `char_loss_weight` from 1.5 to 2.0 while returning `color_loss_weight` to 0.5, to test whether extra character pressure improves exact accuracy.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_pool_query_char2_e1 \
+  --checkpoint-dir checkpoints/convnext_192x576_pool_query_char2_e1 \
+  --init-checkpoint checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 1e-6 \
+  --epochs 1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 2.0 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
+Result:
+
+```text
+epoch=1
+selected_model=ema
+train_loss=0.5006
+val_loss=0.0382
+final_exact_acc=0.9858
+threshold_final_exact_acc=0.9872
+calibrated_final_exact_acc=0.9872
+char_slot_acc=0.99360
+char_sequence_acc=0.9682
+color_slot_acc=0.99940
+color_pattern_acc=0.9974
+char_oracle_final_exact_acc=0.9988
+color_oracle_final_exact_acc=0.9884
+```
+
+Comparison:
+
+```text
+ConvNeXt_192x576_pool_query_lr2e6_E1=0.9874
+ConvNeXt_192x576_pool_query_char2_E1=0.9872
+gain_vs_previous_best=-0.0002
+validation_errors=64
+```
+
+Validation error analysis:
+
+```text
+errors=64
+char_all_wrong=59
+color_wrong=7
+length_wrong=6
+top_confusions=I->1:5, O->0:4, 0->O:3, Q->O:3, E->F:3, 1->I:3
+```
+
+Takeaways:
+
+- Increasing character loss weight to 2.0 did not improve exact accuracy.
+- The current best remains the pool_query low-lr polish with `char_loss_weight=1.5` and `color_loss_weight=0.5`.
+- Further gains probably require targeted handling of ambiguous glyph pairs rather than simply increasing the global character loss.
+
+Artifacts:
+
+```text
+checkpoints/convnext_192x576_pool_query_char2_e1/baseline_best.pt
+outputs/convnext_192x576_pool_query_char2_e1/training_history.csv
+outputs/convnext_192x576_pool_query_char2_e1/val_predictions.csv
+outputs/convnext_192x576_pool_query_char2_e1/val_errors.csv
+outputs/convnext_192x576_pool_query_char2_e1/submission.csv
+logs/convnext_192x576_pool_query_char2_e1.out.log
+logs/convnext_192x576_pool_query_char2_e1.err.log
+```
+
