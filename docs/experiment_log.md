@@ -2097,3 +2097,103 @@ logs/convnext_small_160x480_pool_query_e2.out.log
 logs/convnext_small_160x480_pool_query_e2.err.log
 ```
 
+## 2026-06-19 Checkpoint Logit Ensemble Probe
+
+Motivation:
+
+- Majority voting over existing `val_predictions.csv` reduced validation errors only from 63 to 62.
+- The oracle over several checkpoints reached 0.9920, so there is some complementary signal, but final-string voting is too coarse.
+- I added a reusable `src/ensemble.py` script that averages checkpoint logits, then reuses the existing validation calibration and test submission path.
+
+Implementation:
+
+```text
+script=src/ensemble.py
+ensemble_type=weighted logit average
+supported_inputs=multiple checkpoint paths
+validation=official 90/10 split with seed 2026
+calibration=existing threshold/count/pattern/char-prior scan
+test_output=outputs/<run>/submission.csv
+```
+
+No-TTA smoke command:
+
+```bash
+python -u src/ensemble.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/ensemble_tiny3_notta \
+  --checkpoint-paths \
+    checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+    checkpoints/convnext_192x576_pool_query_e2/baseline_best.pt \
+    checkpoints/convnext_192x576_pool_query_lr1e6_e1/baseline_best.pt \
+  --batch-size 4 \
+  --num-workers 2 \
+  --device cuda \
+  --no-tta \
+  --skip-test
+```
+
+No-TTA result:
+
+```text
+calibrated_final_exact_acc=0.9858
+final_exact_acc=0.9842
+char_slot_acc=0.99260
+color_slot_acc=0.99932
+decode=threshold
+```
+
+TTA command:
+
+```bash
+python -u src/ensemble.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/ensemble_tiny3_tta_eval \
+  --checkpoint-paths \
+    checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+    checkpoints/convnext_192x576_pool_query_e2/baseline_best.pt \
+    checkpoints/convnext_192x576_pool_query_lr1e6_e1/baseline_best.pt \
+  --batch-size 4 \
+  --num-workers 2 \
+  --device cuda \
+  --no-val-diagnostics \
+  --skip-test
+```
+
+TTA result:
+
+```text
+calibrated_final_exact_acc=0.9872
+final_exact_acc=0.9854
+char_slot_acc=0.99352
+color_slot_acc=0.99932
+decode=threshold
+color_thresholds=0.950,0.800,0.550,0.900,0.750
+```
+
+Comparison:
+
+```text
+current_best_single=0.9874
+ensemble_tiny3_tta=0.9872
+gain_vs_current_best=-0.0002
+```
+
+Takeaways:
+
+- The ensemble code works and is useful for later combinations.
+- Equal logit averaging of three very similar Tiny checkpoints does not improve over the best single model.
+- The next step should not be more averaging of near-identical checkpoints; it should target ambiguous glyph pairs or use more diverse models.
+
+Artifacts:
+
+```text
+src/ensemble.py
+outputs/ensemble_tiny3_notta/ensemble_val_metrics.csv
+outputs/ensemble_tiny3_notta/val_ensemble_predictions.csv
+outputs/ensemble_tiny3_notta/val_ensemble_errors.csv
+outputs/ensemble_tiny3_tta_eval/ensemble_val_metrics.csv
+logs/ensemble_tiny3_tta_eval.out.log
+logs/ensemble_tiny3_tta_eval.err.log
+```
+
