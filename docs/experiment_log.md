@@ -1315,3 +1315,89 @@ python -u src/main.py \
   --color-loss-weight 0.5
 ```
 
+## 2026-06-19 192x576 No-Augment Polish E1
+
+Motivation:
+
+- The best 192x576 model reached 0.9866 with training augmentation still enabled.
+- I tested a one-epoch polishing run without augmentation and without scheduler to see whether deterministic training images improve the final exact accuracy.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_noaug_polish_e1 \
+  --checkpoint-dir checkpoints/convnext_192x576_noaug_polish_e1 \
+  --init-checkpoint checkpoints/convnext_192x576_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 2e-6 \
+  --epochs 1 \
+  --batch-size 12 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-augment \
+  --no-scheduler
+```
+
+Result:
+
+```text
+epoch=1
+selected_model=ema
+train_loss=0.3731
+val_loss=0.0434
+final_exact_acc=0.9850
+threshold_final_exact_acc=0.9860
+calibrated_final_exact_acc=0.9860
+char_slot_acc=0.99280
+char_sequence_acc=0.9646
+color_slot_acc=0.99960
+color_pattern_acc=0.9980
+char_oracle_final_exact_acc=0.9990
+color_oracle_final_exact_acc=0.9870
+```
+
+Comparison:
+
+```text
+ConvNeXt_192x576_char_weight_E2=0.9866
+ConvNeXt_192x576_noaug_polish_E1=0.9860
+gain_vs_previous_best=-0.0006
+validation_errors=70
+```
+
+Validation error analysis:
+
+```text
+errors=70
+char_all_wrong=65
+color_wrong=6
+length_wrong=5
+top_confusions=I->1:5, 0->O:4, O->0:4, Q->O:3, O->Q:3, 1->I:3
+```
+
+Takeaways:
+
+- Disabling augmentation reduced validation loss but did not improve final exact accuracy.
+- The current best remains the augmented 192x576 run at 0.9866.
+- For this dataset, augmentation still seems useful for exact-match generalization even at high resolution.
+
+Artifacts:
+
+```text
+checkpoints/convnext_192x576_noaug_polish_e1/baseline_best.pt
+outputs/convnext_192x576_noaug_polish_e1/training_history.csv
+outputs/convnext_192x576_noaug_polish_e1/val_predictions.csv
+outputs/convnext_192x576_noaug_polish_e1/val_errors.csv
+outputs/convnext_192x576_noaug_polish_e1/submission.csv
+logs/convnext_192x576_noaug_polish_e1.out.log
+logs/convnext_192x576_noaug_polish_e1.err.log
+```
+
