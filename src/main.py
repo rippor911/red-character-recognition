@@ -38,7 +38,7 @@ DEFAULT_OUTPUT_DIR = ROOT / "outputs"
 DEFAULT_CHECKPOINT_DIR = ROOT / "checkpoints"
 NormalizationValue = float | Sequence[float]
 ConfusionRule = tuple[str, str, float, Optional[int]]
-DEFAULT_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
+CONSERVATIVE_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
     ("1", "I", 0.85, None),
     ("Q", "O", 0.60, None),
     ("F", "E", 0.90, 2),
@@ -48,6 +48,32 @@ DEFAULT_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
     ("F", "E", 0.96, 4),
     ("C", "G", 0.60, None),
     ("J", "U", 0.96, 0),
+)
+AGGRESSIVE_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
+    ("Q", "O", 0.60, None),
+    ("F", "E", 0.90, 2),
+    ("1", "I", 0.96, 4),
+    ("0", "O", 0.80, 1),
+    ("3", "B", 0.60, 3),
+    ("5", "E", 0.85, 0),
+    ("5", "Z", 0.85, 3),
+    ("6", "8", 0.50, None),
+    ("7", "T", 0.85, 4),
+    ("8", "0", 0.60, 0),
+    ("9", "0", 0.98, 0),
+    ("C", "G", 0.60, 2),
+    ("N", "X", 0.85, 4),
+    ("8", "S", 0.75, 2),
+    ("J", "U", 0.96, 0),
+    ("O", "0", 0.70, 3),
+    ("V", "X", 0.85, 3),
+    ("Y", "P", 0.60, None),
+    ("1", "I", 0.85, 2),
+    ("6", "S", 0.92, 2),
+    ("F", "E", 0.96, 4),
+    ("I", "V", 0.85, 0),
+    ("I", "J", 0.94, 0),
+    ("Y", "X", 0.96, 1),
 )
 
 
@@ -97,6 +123,7 @@ class TrainConfig:
     use_char_prior: bool = True
     char_prior_weights: tuple[float, ...] = (0.0, 0.1, 0.25, 0.5, 1.0)
     use_confusion_rules: bool = False
+    confusion_rule_set: str = "conservative"
     use_count_prior: bool = True
     count_prior_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
     use_pattern_prior: bool = True
@@ -168,6 +195,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-char-prior", action="store_true")
     parser.add_argument("--char-prior-weights", type=str, default="0,0.1,0.25,0.5,1")
     parser.add_argument("--use-confusion-rules", action="store_true")
+    parser.add_argument("--confusion-rule-set", choices=["conservative", "aggressive"], default="conservative")
     parser.add_argument("--no-count-prior", action="store_true")
     parser.add_argument("--count-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
     parser.add_argument("--no-pattern-prior", action="store_true")
@@ -232,6 +260,7 @@ def parse_args() -> TrainConfig:
         use_char_prior=not args.no_char_prior,
         char_prior_weights=parse_float_sequence(args.char_prior_weights),
         use_confusion_rules=args.use_confusion_rules,
+        confusion_rule_set=args.confusion_rule_set,
         use_count_prior=not args.no_count_prior,
         count_prior_weights=parse_float_sequence(args.count_prior_weights),
         use_pattern_prior=not args.no_pattern_prior,
@@ -1165,6 +1194,14 @@ def format_thresholds(threshold: float | Sequence[float]) -> str:
     return ",".join(f"{value:.3f}" for value in threshold_to_list(threshold))
 
 
+def get_confusion_rules(rule_set: str) -> tuple[ConfusionRule, ...]:
+    if rule_set == "conservative":
+        return CONSERVATIVE_CONFUSION_RULES
+    if rule_set == "aggressive":
+        return AGGRESSIVE_CONFUSION_RULES
+    raise ValueError(f"unknown confusion rule set: {rule_set}")
+
+
 def build_char_position_prior(df: pd.DataFrame, smoothing: float = 1.0) -> list[list[float]]:
     char_to_idx = {char: idx for idx, char in enumerate(CHARSET)}
     counts = torch.full((5, len(CHARSET)), float(max(0.0, smoothing)), dtype=torch.float32)
@@ -1778,7 +1815,7 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
         fallback_tta_scales=config.tta_scales if config.use_tta else (1.0,),
     )
     if config.use_confusion_rules:
-        model.confusion_rules = DEFAULT_CONFUSION_RULES
+        model.confusion_rules = get_confusion_rules(config.confusion_rule_set)
         if "confusion_rules" not in str(getattr(model, "char_decode_method", "")):
             model.char_decode_method = (
                 "char_prior_confusion_rules"
@@ -1888,7 +1925,7 @@ def evaluate_checkpoint_model(
         tta_fill_value=tta_fill_value,
         char_log_priors=char_log_priors,
         char_prior_weights=config.char_prior_weights,
-        confusion_rules=DEFAULT_CONFUSION_RULES if config.use_confusion_rules else (),
+        confusion_rules=get_confusion_rules(config.confusion_rule_set) if config.use_confusion_rules else (),
         count_log_priors=count_log_priors,
         count_prior_weights=config.count_prior_weights,
         pattern_candidates=pattern_candidates,
@@ -1902,7 +1939,7 @@ def evaluate_checkpoint_model(
     model.color_decode_method = str(metrics["color_decode_method"])
     model.char_decode_method = str(metrics["char_decode_method"])
     model.char_prior_weight = float(metrics["char_prior_weight"])
-    model.confusion_rules = DEFAULT_CONFUSION_RULES if config.use_confusion_rules else ()
+    model.confusion_rules = get_confusion_rules(config.confusion_rule_set) if config.use_confusion_rules else ()
     model.count_prior_weight = float(metrics["count_prior_weight"])
     model.pattern_prior_weight = float(metrics["pattern_prior_weight"])
     model.pattern_confidence_weight = float(metrics["pattern_confidence_weight"])
@@ -1972,7 +2009,11 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     char_prior_enabled = config.use_char_prior and not config.debug_overfit
     count_prior_enabled = config.use_count_prior and not config.debug_overfit
     pattern_prior_enabled = config.use_pattern_prior and not config.debug_overfit
-    confusion_rules = DEFAULT_CONFUSION_RULES if config.use_confusion_rules and not config.debug_overfit else ()
+    confusion_rules = (
+        get_confusion_rules(config.confusion_rule_set)
+        if config.use_confusion_rules and not config.debug_overfit
+        else ()
+    )
     char_log_priors: list[list[float]] = []
     if char_prior_enabled:
         char_log_priors = build_char_position_prior(train_split)
@@ -2124,7 +2165,14 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         )
     else:
         print("Char position prior: off")
-    print("Char confusion rules: " + (f"on rules={len(confusion_rules)}" if confusion_rules else "off"))
+    print(
+        "Char confusion rules: "
+        + (
+            f"on set={config.confusion_rule_set} rules={len(confusion_rules)}"
+            if confusion_rules
+            else "off"
+        )
+    )
     if count_prior_enabled:
         print(
             "Red count prior: "

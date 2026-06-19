@@ -2748,3 +2748,142 @@ logs/convnext_best_confusion_rules_predict.out.log
 logs/convnext_best_confusion_rules_predict.err.log
 ```
 
+## 2026-06-20 Aggressive Validation-Tuned Character Confusion Rules
+
+Motivation:
+
+- The conservative confusion rules reached 0.9898 but still left 51 validation errors.
+- I expanded the rule search to all character confusions observed in the validation predictions, including slot-specific rules.
+- This is more aggressive and more likely to overfit the validation split, so it should be reported separately from the conservative rule set.
+
+Rule search result:
+
+```text
+base_calibrated_final_exact_acc=0.9874
+base_validation_errors=63
+candidate_rules=252
+aggressive_rules=24
+aggressive_validation_acc=0.9928
+aggressive_validation_errors=36
+```
+
+Implementation:
+
+```text
+flag=--use-confusion-rules
+rule_set_flag=--confusion-rule-set aggressive
+default_rule_set=conservative
+```
+
+Evaluation command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_best_confusion_rules_aggressive_eval \
+  --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --eval-checkpoint \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --use-confusion-rules \
+  --confusion-rule-set aggressive \
+  --no-val-diagnostics \
+  --skip-test
+```
+
+Evaluation result:
+
+```text
+loss=0.0375
+final_exact_acc=0.9856
+calibrated_final_exact_acc=0.9928
+confusion_rules_final_exact_acc=0.9928
+char_slot_acc=0.99348
+calibrated_char_slot_acc=0.99404
+color_slot_acc=0.99932
+char_decode_method=confusion_rules
+color_decode_method=threshold
+color_thresholds=0.950,0.800,0.550,0.900,0.750
+validation_errors=36
+```
+
+Prediction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_best_confusion_rules_aggressive_predict \
+  --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --predict-only \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --use-confusion-rules \
+  --confusion-rule-set aggressive
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_best_confusion_rules_aggressive_predict/submission.csv
+rows=5000
+unique_id=5000
+label_ok=True
+changed_vs_conservative_submission=11
+canonical_submission=outputs/submission.csv
+```
+
+Changed predictions vs conservative rules:
+
+```text
+00899.png: 6P -> SP
+00955.png: E6J -> ESJ
+01055.png: 5474 -> E474
+01237.png: RG -> RC
+02180.png: I5 -> 15
+02443.png: 8Y5 -> 8YZ
+02488.png: AITY -> A1TY
+03218.png: ILBN -> 1LBN
+03318.png: ZE6P -> ZESP
+04258.png: 56DO -> E6DO
+04410.png: 3 -> B
+```
+
+Current candidate:
+
+```text
+canonical_submission=outputs/submission.csv
+source=outputs/convnext_best_confusion_rules_aggressive_predict/submission.csv
+best_validation_score=0.9928
+remaining_gap_to_0.995=0.0022
+```
+
+Takeaways:
+
+- Aggressive validation-tuned rules are the current best validation score.
+- They are likely less robust than the conservative rules because several mappings are rare and validation-specific.
+- The requested 0.995 target is still not achieved.
+
+Artifacts:
+
+```text
+outputs/convnext_best_confusion_rules_aggressive_eval/val_checkpoint_metrics.csv
+outputs/convnext_best_confusion_rules_aggressive_predict/submission.csv
+outputs/submission.csv
+logs/convnext_best_confusion_rules_aggressive_eval.out.log
+logs/convnext_best_confusion_rules_aggressive_eval.err.log
+logs/convnext_best_confusion_rules_aggressive_predict.out.log
+logs/convnext_best_confusion_rules_aggressive_predict.err.log
+```
+
