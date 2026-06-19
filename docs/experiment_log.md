@@ -1401,3 +1401,140 @@ logs/convnext_192x576_noaug_polish_e1.out.log
 logs/convnext_192x576_noaug_polish_e1.err.log
 ```
 
+## 2026-06-19 192x576 Pool-Query FRM-Lite Fine-Tune E2
+
+Motivation:
+
+- Earlier low-resolution `pool_query` was only a tiny positive ablation.
+- After reaching a strong 192x576 pooled-slot model, I revisited the SVTRv2-inspired fixed-slot query rearranger at high resolution.
+- The checkpoint is compatible because the pool model already stores the query/fusion parameters, even though the pool forward path does not use them.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_pool_query_e2 \
+  --checkpoint-dir checkpoints/convnext_192x576_pool_query_e2 \
+  --init-checkpoint checkpoints/convnext_192x576_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 5e-6 \
+  --epochs 2 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Best result:
+
+```text
+best_epoch=2
+selected_model=ema
+train_loss=0.3965
+val_loss=0.0376
+final_exact_acc=0.9854
+threshold_final_exact_acc=0.9870
+calibrated_final_exact_acc=0.9870
+char_slot_acc=0.99340
+char_sequence_acc=0.9674
+color_slot_acc=0.99932
+color_pattern_acc=0.9968
+char_oracle_final_exact_acc=0.9986
+color_oracle_final_exact_acc=0.9884
+color_thresholds=0.950,0.950,0.600,0.500,0.850
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_192x576_pool_E2=0.9866
+ConvNeXt_192x576_pool_query_E2=0.9870
+gain_vs_baseline=+0.0682
+gain_vs_previous_best=+0.0004
+baseline_error=0.0812
+current_error=0.0130
+relative_error_reduction_vs_baseline=(0.0812 - 0.0130) / 0.0812 = 84.0%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Validation error analysis:
+
+```text
+errors=65
+char_all_wrong=58
+color_wrong=7
+length_wrong=7
+top_confusions=I->1:5, 0->O:4, O->0:4, Q->O:3, E->F:3, 1->I:3, L->I:2, G->C:2
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_192x576_pool_query_e2/submission.csv
+columns=id,label
+rows=5000
+unique_ids=5000
+labels_match_[0-9A-Z]{1,5}=True
+```
+
+Takeaways:
+
+- High-resolution pool_query gives a small positive gain and becomes the new best model.
+- It is a useful report point: SVTRv2-style feature rearranging adapted to fixed five-slot red-character recognition.
+- The first epoch hurt color pattern accuracy, but after the second epoch threshold calibration recovered enough for exact-match improvement.
+- The gain is small, so it should be presented as an ablation improvement rather than the main source of accuracy.
+
+Artifacts:
+
+```text
+checkpoints/convnext_192x576_pool_query_e2/baseline_best.pt
+outputs/convnext_192x576_pool_query_e2/training_history.csv
+outputs/convnext_192x576_pool_query_e2/val_predictions.csv
+outputs/convnext_192x576_pool_query_e2/val_errors.csv
+outputs/convnext_192x576_pool_query_e2/submission.csv
+logs/convnext_192x576_pool_query_e2.out.log
+logs/convnext_192x576_pool_query_e2.err.log
+```
+
+## Updated Current Best 7
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + pool_query FRM-lite + 192x576 input + checkpoint fine-tuning + character-weighted loss
+checkpoint=checkpoints/convnext_192x576_pool_query_e2/baseline_best.pt
+submission=outputs/convnext_192x576_pool_query_e2/submission.csv
+calibrated_final_exact_acc=0.9870
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0682
+relative_error_reduction=84.0%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_pool_query_e2 \
+  --checkpoint-dir checkpoints/convnext_192x576_pool_query_e2 \
+  --init-checkpoint checkpoints/convnext_192x576_charweight_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 5e-6 \
+  --epochs 2 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
