@@ -2457,3 +2457,97 @@ logs/slot_crop_192x576_lr5e5_e3.out.log
 logs/slot_crop_192x576_lr5e5_e3.err.log
 ```
 
+## 2026-06-19 224x672 Whole-Image High-Resolution Polish E1
+
+Motivation:
+
+- Current best still has ambiguous glyph confusions, so I tested a larger input size to preserve more stroke detail.
+- The run continued from the best 192x576 pool_query checkpoint with a very low learning rate.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_224x672_pool_query_e1 \
+  --checkpoint-dir checkpoints/convnext_224x672_pool_query_e1 \
+  --init-checkpoint checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 224 \
+  --image-width 672 \
+  --learning-rate 1e-6 \
+  --epochs 1 \
+  --batch-size 6 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
+Result:
+
+```text
+epoch=1
+selected_model=raw
+train_loss=0.3969
+val_loss=0.0412
+final_exact_acc=0.9848
+threshold_final_exact_acc=0.9858
+calibrated_final_exact_acc=0.9858
+char_slot_acc=0.9926
+char_sequence_acc=0.9638
+color_slot_acc=0.9995
+color_pattern_acc=0.9976
+char_oracle_final_exact_acc=0.9984
+color_oracle_final_exact_acc=0.9872
+```
+
+Comparison:
+
+```text
+current_best_192x576=0.9874
+convnext_224x672_pool_query_E1=0.9858
+gain_vs_current_best=-0.0016
+validation_errors=71
+```
+
+Validation error analysis:
+
+```text
+errors=71
+char_all_wrong=64
+color_wrong=8
+length_wrong=8
+top_confusions=E->F:5, I->1:5, 0->O:4, L->I:3, Q->O:3, 1->I:3, O->0:2, C->G:2, I->T:1, E->B:1, 0->U:1, C->Z:1
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_224x672_pool_query_e1/submission.csv
+rows=5000
+unique_id=5000
+label_ok=True
+```
+
+Takeaways:
+
+- 224x672 fits on the local RTX 4060 at batch size 6, using about 5.6GB GPU memory.
+- It did not improve the best validation score; the higher-resolution continuation appears to perturb the already tuned character head.
+- The current best remains `checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt`.
+
+Artifacts:
+
+```text
+checkpoints/convnext_224x672_pool_query_e1/baseline_best.pt
+outputs/convnext_224x672_pool_query_e1/training_history.csv
+outputs/convnext_224x672_pool_query_e1/val_predictions.csv
+outputs/convnext_224x672_pool_query_e1/val_errors.csv
+outputs/convnext_224x672_pool_query_e1/submission.csv
+logs/convnext_224x672_pool_query_e1.out.log
+logs/convnext_224x672_pool_query_e1.err.log
+```
+
