@@ -143,6 +143,12 @@ python src/main.py --debug-overfit --debug-samples 128 --epochs 30 --batch-size 
 python src/main.py --model convnext_tiny --normalization imagenet --image-height 96 --image-width 320 --learning-rate 3e-4 --batch-size 32
 ```
 
+Stronger public ImageNet backbone option:
+
+```bash
+python src/main.py --model convnext_small --slot-extractor pool_query --normalization imagenet --image-height 160 --image-width 480 --learning-rate 1e-4 --batch-size 4
+```
+
 `--model baseline_cnn` 是默认小 CNN；`--model convnext_tiny` 会使用 TorchVision `ConvNeXt_Tiny_Weights.IMAGENET1K_V1` 初始化视觉 backbone。若只想验证结构、不加载预训练权重，可加 `--no-pretrained-backbone`。预训练模型来源和实验过程记录在 [docs/experiment_log.md](docs/experiment_log.md)。
 
 SVTRv2 启发的固定槽位特征重排实验：

@@ -125,7 +125,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-color-class-weight", action="store_true")
     parser.add_argument("--max-color-class-weight", type=float, default=3.0)
     parser.add_argument("--max-grad-norm", type=float, default=5.0)
-    parser.add_argument("--model", choices=["baseline_cnn", "convnext_tiny"], default="baseline_cnn")
+    parser.add_argument("--model", choices=["baseline_cnn", "convnext_tiny", "convnext_small"], default="baseline_cnn")
     parser.add_argument("--no-pretrained-backbone", action="store_true")
     parser.add_argument("--feature-dim", type=int, default=384)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -264,7 +264,7 @@ def build_model(
             slot_pooling=slot_pooling,
             use_slot_context=use_slot_context,
         )
-    if model_name == "convnext_tiny":
+    if model_name in {"convnext_tiny", "convnext_small"}:
         return PretrainedConvNeXtSlotModel(
             num_chars=num_chars,
             feature_dim=feature_dim,
@@ -275,6 +275,7 @@ def build_model(
             use_slot_context=use_slot_context,
             pretrained=pretrained_backbone,
             slot_extractor=slot_extractor,
+            backbone_name=model_name,
         )
     raise ValueError(f"unknown model_name: {model_name}")
 

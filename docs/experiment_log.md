@@ -1930,3 +1930,96 @@ logs/convnext_192x576_pool_query_char2_e1.out.log
 logs/convnext_192x576_pool_query_char2_e1.err.log
 ```
 
+## 2026-06-19 ConvNeXt-Small Backbone Integration
+
+Motivation:
+
+- The best ConvNeXt-Tiny run is stuck at `calibrated_final_exact_acc=0.9874`.
+- Recent ablations show the remaining mistakes are dominated by ambiguous character pairs, not global color decoding.
+- I added a stronger public ImageNet-pretrained TorchVision backbone as the next high-yield direction while keeping the same five-slot character/color heads and no test-label leakage.
+
+Implementation changes:
+
+- Added `convnext_small` to the existing `PretrainedConvNeXtSlotModel`.
+- Kept `convnext_tiny` checkpoint loading backward compatible by defaulting the internal backbone name to `convnext_tiny`.
+- Added CLI support: `--model convnext_small`.
+
+Pretrained model source:
+
+```text
+library=torchvision 0.22.1+cu128
+model=TorchVision ConvNeXt-Small
+weights=ConvNeXt_Small_Weights.IMAGENET1K_V1
+source_url=https://download.pytorch.org/models/convnext_small-0c510722.pth
+cache_file=C:\Users\GJR79\.cache\torch\hub\checkpoints\convnext_small-0c510722.pth
+```
+
+Shape check:
+
+```text
+input_shape=(1, 3, 96, 288)
+char_logits_shape=(1, 5, 36)
+color_logits_shape=(1, 5, 2)
+```
+
+Smoke command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_small_smoke \
+  --checkpoint-dir checkpoints/convnext_small_smoke \
+  --model convnext_small \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 96 \
+  --image-width 288 \
+  --learning-rate 1e-4 \
+  --epochs 1 \
+  --batch-size 2 \
+  --num-workers 0 \
+  --device cuda \
+  --debug-overfit \
+  --debug-samples 8 \
+  --skip-test
+```
+
+Smoke result:
+
+```text
+Device: cuda
+Model parameters: 52,279,390
+train_loss=4.3061
+debug_train_loss=3.9892
+calibrated_final_exact_acc=0.0000
+char_slot_acc=0.2000
+color_slot_acc=0.5750
+checkpoint_saved=checkpoints/convnext_small_smoke/baseline_best.pt
+```
+
+Next run:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_small_160x480_pool_query_e2 \
+  --checkpoint-dir checkpoints/convnext_small_160x480_pool_query_e2 \
+  --model convnext_small \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 160 \
+  --image-width 480 \
+  --learning-rate 1e-4 \
+  --epochs 2 \
+  --batch-size 4 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Expected value:
+
+- This is not directly initialized from the current Tiny checkpoint because backbone shapes differ.
+- The first two epochs should tell whether the larger backbone can beat the 0.9874 plateau after a longer run or whether it needs a lower LR/frozen-backbone warmup.
+

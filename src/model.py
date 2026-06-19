@@ -1,6 +1,17 @@
 import torch
 from torch import nn
-from torchvision.models import ConvNeXt_Tiny_Weights, convnext_tiny
+from torchvision.models import (
+    ConvNeXt_Small_Weights,
+    ConvNeXt_Tiny_Weights,
+    convnext_small,
+    convnext_tiny,
+)
+
+
+CONVNEXT_BACKBONES = {
+    "convnext_tiny": (convnext_tiny, ConvNeXt_Tiny_Weights.IMAGENET1K_V1, 768),
+    "convnext_small": (convnext_small, ConvNeXt_Small_Weights.IMAGENET1K_V1, 768),
+}
 
 
 class ConvBlock(nn.Sequential):
@@ -248,12 +259,16 @@ class PretrainedConvNeXtSlotModel(nn.Module):
         use_slot_context: bool = True,
         pretrained: bool = True,
         slot_extractor: str = "pool",
+        backbone_name: str = "convnext_tiny",
     ):
         super().__init__()
         if slot_pooling not in {"avg", "max", "avgmax"}:
             raise ValueError(f"slot_pooling must be one of avg, max, avgmax; got {slot_pooling!r}")
         if slot_extractor not in {"pool", "query", "pool_query"}:
             raise ValueError(f"slot_extractor must be one of pool, query, pool_query; got {slot_extractor!r}")
+        if backbone_name not in CONVNEXT_BACKBONES:
+            supported = ", ".join(sorted(CONVNEXT_BACKBONES))
+            raise ValueError(f"backbone_name must be one of {supported}; got {backbone_name!r}")
         self.num_slots = num_slots
         self.num_chars = num_chars
         self.position_specific_heads = position_specific_heads
@@ -261,11 +276,12 @@ class PretrainedConvNeXtSlotModel(nn.Module):
         self.use_slot_context = use_slot_context
         self.pretrained = pretrained
         self.slot_extractor = slot_extractor
+        self.backbone_name = backbone_name
 
-        weights = ConvNeXt_Tiny_Weights.IMAGENET1K_V1 if pretrained else None
-        convnext = convnext_tiny(weights=weights)
+        backbone_factory, default_weights, backbone_dim = CONVNEXT_BACKBONES[backbone_name]
+        weights = default_weights if pretrained else None
+        convnext = backbone_factory(weights=weights)
         self.backbone = convnext.features
-        backbone_dim = 768
 
         self.slot_avg_pool = nn.AdaptiveAvgPool2d((1, num_slots))
         self.slot_max_pool = nn.AdaptiveMaxPool2d((1, num_slots))
