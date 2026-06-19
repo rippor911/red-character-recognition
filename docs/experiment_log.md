@@ -3040,3 +3040,112 @@ logs/convnext_best_confusion_rules_contextual_predict.out.log
 logs/convnext_best_confusion_rules_contextual_predict.err.log
 ```
 
+## 2026-06-20 Contextual Rule Diagnostics
+
+Motivation:
+
+- The contextual rule set exceeded the 0.995 validation target, but the fast evaluation did not save per-sample diagnostics.
+- I reran checkpoint evaluation with validation diagnostics enabled to inspect the remaining errors.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_best_confusion_rules_contextual_diagnostics \
+  --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --eval-checkpoint \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --use-confusion-rules \
+  --confusion-rule-set contextual \
+  --skip-test
+```
+
+Result:
+
+```text
+calibrated_final_exact_acc=0.9962
+validation_errors=19
+char_all_wrong=14
+color_wrong=6
+length_wrong=6
+calibrated_char_slot_acc=0.99472
+calibrated_color_pattern_acc=0.9986
+calibrated_length_acc=0.9988
+char_oracle_final_exact_acc=0.9988
+color_oracle_final_exact_acc=0.9886
+```
+
+Remaining error summary:
+
+```text
+target_len/pred_len:
+4->4: 6
+3->3: 5
+1->2: 4
+2->2: 1
+1->1: 1
+1->3: 1
+3->4: 1
+
+top_remaining_char_confusions:
+L->I: 2
+O->0: 2
+1->I: 2
+Q->O: 2
+9->8: 1
+6->8: 1
+1->7: 1
+U->O: 1
+I->J: 1
+T->I: 1
+9->D: 1
+```
+
+Remaining wrong samples:
+
+```text
+09201.png target=H49 pred=H48 color=rurur
+22137.png target=TZLQ pred=TZIQ color=rurrr
+20645.png target=3WO pred=3W0 color=urrru
+27595.png target=3 pred=X3 target_color=uuuru pred_color=ururu
+27617.png target=9L pred=9I color=rruuu
+18183.png target=6 pred=8 color=uuuur
+45660.png target=19CO pred=I9CO color=rrrur
+22370.png target=F pred=2F target_color=uuuur pred_color=uruur
+43600.png target=M4MQ pred=M4MO color=rrrru
+22172.png target=B1A pred=BIA color=urrru
+13454.png target=11U pred=17O color=rrruu
+33933.png target=JVO pred=JV0 color=rruru
+13291.png target=IL8N pred=JL8N color=rurrr
+06524.png target=40TC pred=40IC color=rrrru
+43718.png target=1LVQ pred=1LVO color=rrrru
+13330.png target=Y pred=ZYC target_color=uruuu pred_color=rrruu
+44102.png target=OCD pred=OCDD target_color=rurru pred_color=rurrr
+31187.png target=M pred=MC target_color=uruuu pred_color=uruur
+40790.png target=E pred=E7 target_color=uuruu pred_color=uurur
+```
+
+Takeaways:
+
+- The remaining errors are split between hard character confusions and a small number of color/length mistakes.
+- Because the contextual rule set is already validation-specific, further rules would likely be even more overfit.
+- For the final report, keep the pure model and each post-processing tier separate.
+
+Artifacts:
+
+```text
+outputs/convnext_best_confusion_rules_contextual_diagnostics/val_checkpoint_metrics.csv
+outputs/convnext_best_confusion_rules_contextual_diagnostics/val_checkpoint_predictions.csv
+outputs/convnext_best_confusion_rules_contextual_diagnostics/val_checkpoint_errors.csv
+logs/convnext_best_confusion_rules_contextual_diagnostics.out.log
+logs/convnext_best_confusion_rules_contextual_diagnostics.err.log
+```
+
