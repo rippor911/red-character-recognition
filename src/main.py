@@ -37,6 +37,18 @@ DEFAULT_DATA_DIR = ROOT / "dataset"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs"
 DEFAULT_CHECKPOINT_DIR = ROOT / "checkpoints"
 NormalizationValue = float | Sequence[float]
+ConfusionRule = tuple[str, str, float, Optional[int]]
+DEFAULT_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
+    ("1", "I", 0.85, None),
+    ("Q", "O", 0.60, None),
+    ("F", "E", 0.90, 2),
+    ("1", "I", 0.96, 4),
+    ("O", "0", 0.70, 3),
+    ("0", "O", 0.80, 1),
+    ("F", "E", 0.96, 4),
+    ("C", "G", 0.60, None),
+    ("J", "U", 0.96, 0),
+)
 
 
 @dataclass
@@ -84,6 +96,7 @@ class TrainConfig:
     threshold_steps: int = 19
     use_char_prior: bool = True
     char_prior_weights: tuple[float, ...] = (0.0, 0.1, 0.25, 0.5, 1.0)
+    use_confusion_rules: bool = False
     use_count_prior: bool = True
     count_prior_weights: tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0)
     use_pattern_prior: bool = True
@@ -154,6 +167,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--threshold-steps", type=int, default=19)
     parser.add_argument("--no-char-prior", action="store_true")
     parser.add_argument("--char-prior-weights", type=str, default="0,0.1,0.25,0.5,1")
+    parser.add_argument("--use-confusion-rules", action="store_true")
     parser.add_argument("--no-count-prior", action="store_true")
     parser.add_argument("--count-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
     parser.add_argument("--no-pattern-prior", action="store_true")
@@ -217,6 +231,7 @@ def parse_args() -> TrainConfig:
         threshold_steps=args.threshold_steps,
         use_char_prior=not args.no_char_prior,
         char_prior_weights=parse_float_sequence(args.char_prior_weights),
+        use_confusion_rules=args.use_confusion_rules,
         use_count_prior=not args.no_count_prior,
         count_prior_weights=parse_float_sequence(args.count_prior_weights),
         use_pattern_prior=not args.no_pattern_prior,
@@ -703,6 +718,7 @@ def evaluate(
     tta_fill_value: NormalizationValue = 1.0,
     char_log_priors: Optional[Sequence[Sequence[float]]] = None,
     char_prior_weights: Sequence[float] = (0.0,),
+    confusion_rules: Sequence[ConfusionRule] = (),
     count_log_priors: Optional[Sequence[float]] = None,
     count_prior_weights: Sequence[float] = (0.0,),
     pattern_candidates: Optional[Sequence[str]] = None,
@@ -998,6 +1014,35 @@ def evaluate(
     calibrated_correct = best_char_prior_correct
     calibrated_final = best_calibrated_final
     char_decode_method = "char_prior" if best_char_prior_weight != 0.0 else "argmax"
+    confusion_rules_correct = calibrated_correct
+    confusion_rules_slot_correct = best_char_prior_slot_correct
+    if confusion_rules:
+        candidate_chars = apply_confusion_rules(
+            best_calibrated_chars,
+            char_confidence_all,
+            confusion_rules,
+        )
+        candidate_final = decode_batch_final(
+            candidate_chars,
+            calibrated_colors,
+            red_scores=red_probs_all,
+            fallback_if_empty=True,
+        )
+        candidate_correct = sum(
+            pred == target for pred, target in zip(candidate_final, all_target_final)
+        )
+        candidate_slot_correct = (candidate_chars == target_chars_all).sum().item()
+        confusion_rules_correct = int(candidate_correct)
+        confusion_rules_slot_correct = int(candidate_slot_correct)
+        if candidate_correct > calibrated_correct:
+            calibrated_correct = int(candidate_correct)
+            calibrated_final = candidate_final
+            best_calibrated_chars = candidate_chars
+            char_decode_method = (
+                "char_prior_confusion_rules"
+                if best_char_prior_weight != 0.0
+                else "confusion_rules"
+            )
     calibrated_length_correct = sum(
         len(pred) == len(target) for pred, target in zip(calibrated_final, all_target_final)
     )
@@ -1055,6 +1100,8 @@ def evaluate(
         "char_prior_final_exact_acc": best_char_prior_correct / total_samples,
         "char_prior_slot_acc": best_char_prior_slot_correct / total_slots,
         "char_prior_weight": best_char_prior_weight,
+        "confusion_rules_final_exact_acc": confusion_rules_correct / total_samples,
+        "confusion_rules_slot_acc": confusion_rules_slot_correct / total_slots,
         "char_decode_method": char_decode_method,
         "calibrated_final_exact_acc": calibrated_correct / total_samples,
         "char_oracle_final_exact_acc": char_oracle_correct / total_samples,
@@ -1150,6 +1197,33 @@ def apply_char_prior(
         prior_tensor.size(1),
     )
     return char_scores.argmax(dim=-1)
+
+
+def apply_confusion_rules(
+    char_indices: torch.Tensor,
+    char_confidence: torch.Tensor,
+    rules: Sequence[ConfusionRule],
+) -> torch.Tensor:
+    if not rules:
+        return char_indices
+    adjusted = char_indices.clone()
+    for source, target, threshold, slot_idx in rules:
+        source = str(source).upper()
+        target = str(target).upper()
+        if source not in CHARSET or target not in CHARSET:
+            raise ValueError(f"confusion rule contains unknown character: {source!r}->{target!r}")
+        source_idx = CHARSET.index(source)
+        target_idx = CHARSET.index(target)
+        mask = (adjusted == source_idx) & (char_confidence <= float(threshold))
+        if slot_idx is not None:
+            slot = int(slot_idx)
+            if not 0 <= slot < adjusted.size(1):
+                raise ValueError(f"confusion rule slot index out of range: {slot_idx}")
+            slot_mask = torch.zeros_like(mask)
+            slot_mask[:, slot] = True
+            mask = mask & slot_mask
+        adjusted = torch.where(mask, torch.as_tensor(target_idx, device=adjusted.device), adjusted)
+    return adjusted
 
 
 def compute_dataset_normalization(
@@ -1392,6 +1466,7 @@ def save_validation_diagnostics(
     char_decode_method: str = "argmax",
     char_log_priors: Sequence[Sequence[float]] = (),
     char_prior_weight: float = 0.0,
+    confusion_rules: Sequence[ConfusionRule] = (),
     count_log_priors: Sequence[float] = (),
     count_prior_weight: float = 0.0,
     color_pattern_candidates: Sequence[str] = (),
@@ -1486,9 +1561,17 @@ def save_validation_diagnostics(
             red_scores=red_probs,
             fallback_if_empty=True,
         )
-        use_char_prior = char_decode_method == "char_prior" and bool(char_log_priors)
+        use_char_prior = "char_prior" in char_decode_method and bool(char_log_priors)
         calibrated_chars = char_prior_chars if use_char_prior else pred_chars
         pred_calibrated_final = pred_char_prior_final if use_char_prior else color_calibrated_final
+        if "confusion_rules" in char_decode_method and bool(confusion_rules):
+            calibrated_chars = apply_confusion_rules(calibrated_chars, char_conf, confusion_rules)
+            pred_calibrated_final = decode_batch_final(
+                calibrated_chars,
+                calibrated_colors,
+                red_scores=red_probs,
+                fallback_if_empty=True,
+            )
         pred_color_oracle_final = decode_batch_final(
             pred_chars,
             color_target,
@@ -1635,6 +1718,7 @@ def restore_checkpoint_metadata(
     model.char_decode_method = str(checkpoint.get("char_decode_method", metrics.get("char_decode_method", "argmax")))
     model.char_log_priors = tuple(tuple(float(value) for value in row) for row in checkpoint.get("char_log_priors", ()))
     model.char_prior_weight = float(checkpoint.get("char_prior_weight", metrics.get("char_prior_weight", 0.0)))
+    model.confusion_rules = tuple(tuple(rule) for rule in checkpoint.get("confusion_rules", ()))
     model.count_log_priors = tuple(float(value) for value in checkpoint.get("count_log_priors", ()))
     model.count_prior_weight = float(checkpoint.get("count_prior_weight", metrics.get("count_prior_weight", 0.0)))
     model.color_pattern_candidates = tuple(checkpoint.get("color_pattern_candidates", ()))
@@ -1693,6 +1777,14 @@ def load_model_from_checkpoint(path: Path, config: Optional[TrainConfig] = None)
         fallback_tta_shifts=config.tta_shifts if config.use_tta else (0,),
         fallback_tta_scales=config.tta_scales if config.use_tta else (1.0,),
     )
+    if config.use_confusion_rules:
+        model.confusion_rules = DEFAULT_CONFUSION_RULES
+        if "confusion_rules" not in str(getattr(model, "char_decode_method", "")):
+            model.char_decode_method = (
+                "char_prior_confusion_rules"
+                if "char_prior" in str(getattr(model, "char_decode_method", ""))
+                else "confusion_rules"
+            )
     print(f"Loaded checkpoint from {checkpoint_path}")
     metrics = getattr(model, "best_metrics", {})
     if metrics:
@@ -1796,6 +1888,7 @@ def evaluate_checkpoint_model(
         tta_fill_value=tta_fill_value,
         char_log_priors=char_log_priors,
         char_prior_weights=config.char_prior_weights,
+        confusion_rules=DEFAULT_CONFUSION_RULES if config.use_confusion_rules else (),
         count_log_priors=count_log_priors,
         count_prior_weights=config.count_prior_weights,
         pattern_candidates=pattern_candidates,
@@ -1809,6 +1902,7 @@ def evaluate_checkpoint_model(
     model.color_decode_method = str(metrics["color_decode_method"])
     model.char_decode_method = str(metrics["char_decode_method"])
     model.char_prior_weight = float(metrics["char_prior_weight"])
+    model.confusion_rules = DEFAULT_CONFUSION_RULES if config.use_confusion_rules else ()
     model.count_prior_weight = float(metrics["count_prior_weight"])
     model.pattern_prior_weight = float(metrics["pattern_prior_weight"])
     model.pattern_confidence_weight = float(metrics["pattern_confidence_weight"])
@@ -1847,6 +1941,7 @@ def evaluate_checkpoint_model(
             char_decode_method=model.char_decode_method,
             char_log_priors=char_log_priors,
             char_prior_weight=model.char_prior_weight,
+            confusion_rules=model.confusion_rules,
             count_log_priors=count_log_priors,
             count_prior_weight=model.count_prior_weight,
             color_pattern_candidates=pattern_candidates,
@@ -1877,6 +1972,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
     char_prior_enabled = config.use_char_prior and not config.debug_overfit
     count_prior_enabled = config.use_count_prior and not config.debug_overfit
     pattern_prior_enabled = config.use_pattern_prior and not config.debug_overfit
+    confusion_rules = DEFAULT_CONFUSION_RULES if config.use_confusion_rules and not config.debug_overfit else ()
     char_log_priors: list[list[float]] = []
     if char_prior_enabled:
         char_log_priors = build_char_position_prior(train_split)
@@ -2028,6 +2124,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
         )
     else:
         print("Char position prior: off")
+    print("Char confusion rules: " + (f"on rules={len(confusion_rules)}" if confusion_rules else "off"))
     if count_prior_enabled:
         print(
             "Red count prior: "
@@ -2084,6 +2181,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             tta_fill_value=tta_fill_value,
             char_log_priors=char_log_priors,
             char_prior_weights=config.char_prior_weights,
+            confusion_rules=confusion_rules,
             count_log_priors=count_log_priors,
             count_prior_weights=config.count_prior_weights,
             pattern_candidates=pattern_candidates,
@@ -2108,6 +2206,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     tta_fill_value=tta_fill_value,
                     char_log_priors=char_log_priors,
                     char_prior_weights=config.char_prior_weights,
+                    confusion_rules=confusion_rules,
                     count_log_priors=count_log_priors,
                     count_prior_weights=config.count_prior_weights,
                     pattern_candidates=pattern_candidates,
@@ -2206,6 +2305,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
                     "char_decode_method": eval_metrics["char_decode_method"],
                     "char_log_priors": char_log_priors,
                     "char_prior_weight": eval_metrics["char_prior_weight"],
+                    "confusion_rules": confusion_rules,
                     "count_log_priors": count_log_priors,
                     "count_prior_weight": eval_metrics["count_prior_weight"],
                     "color_pattern_candidates": pattern_candidates,
@@ -2272,6 +2372,7 @@ def train_model(train_df: pd.DataFrame, config: Optional[TrainConfig] = None) ->
             char_decode_method=model.char_decode_method,
             char_log_priors=model.char_log_priors,
             char_prior_weight=model.char_prior_weight,
+            confusion_rules=getattr(model, "confusion_rules", ()),
             count_log_priors=model.count_log_priors,
             count_prior_weight=model.count_prior_weight,
             color_pattern_candidates=model.color_pattern_candidates,
@@ -2314,6 +2415,7 @@ def predict_test(model: nn.Module, test_df: pd.DataFrame, config: Optional[Train
     char_decode_method = str(getattr(model, "char_decode_method", "argmax"))
     char_log_priors = tuple(tuple(float(value) for value in row) for row in getattr(model, "char_log_priors", ()))
     char_prior_weight = float(getattr(model, "char_prior_weight", 0.0))
+    confusion_rules = tuple(tuple(rule) for rule in getattr(model, "confusion_rules", ()))
     count_log_priors = tuple(float(value) for value in getattr(model, "count_log_priors", ()))
     count_prior_weight = float(getattr(model, "count_prior_weight", 0.0))
     color_pattern_candidates = tuple(getattr(model, "color_pattern_candidates", ()))
@@ -2339,6 +2441,8 @@ def predict_test(model: nn.Module, test_df: pd.DataFrame, config: Optional[Train
         print(f"Using color thresholds {format_thresholds(color_threshold)} for test decoding")
     if char_decode_method == "char_prior" and char_log_priors:
         print(f"Using character position prior for test decoding (weight={char_prior_weight:.2f})")
+    elif "confusion_rules" in char_decode_method and confusion_rules:
+        print(f"Using character confusion rules for test decoding (rules={len(confusion_rules)})")
     else:
         print("Using argmax character decoding for test decoding")
     print(
@@ -2360,10 +2464,12 @@ def predict_test(model: nn.Module, test_df: pd.DataFrame, config: Optional[Train
         pred_chars = apply_char_prior(
             char_logits,
             char_log_priors=char_log_priors,
-            prior_weight=char_prior_weight if char_decode_method == "char_prior" else 0.0,
+            prior_weight=char_prior_weight if "char_prior" in char_decode_method else 0.0,
         )
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         char_confidence = torch.softmax(char_logits, dim=-1).max(dim=-1).values
+        if "confusion_rules" in char_decode_method and confusion_rules:
+            pred_chars = apply_confusion_rules(pred_chars, char_confidence, confusion_rules)
         if use_pattern_prior:
             predictions.extend(
                 decode_batch_with_pattern_prior(

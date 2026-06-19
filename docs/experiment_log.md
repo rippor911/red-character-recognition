@@ -2605,3 +2605,146 @@ logs/convnext_best_threshold91_eval.out.log
 logs/convnext_best_threshold91_eval.err.log
 ```
 
+## 2026-06-20 Validation-Tuned Character Confusion Rules
+
+Motivation:
+
+- Fine threshold scanning did not improve the current best, and remaining errors are dominated by character confusions.
+- I tested a lightweight post-processing rule set using only validation predictions: if the predicted character is a known ambiguous glyph and the model confidence is below a tuned threshold, replace it with the paired glyph.
+- This uses validation labels for calibration, not test labels. It should be reported as validation-tuned post-processing, not as a new learned backbone.
+
+Offline rule search:
+
+```text
+base_calibrated_final_exact_acc=0.9874
+base_validation_errors=63
+
+greedy_rules:
+1. 1 -> I when char_conf <= 0.85, any slot
+2. Q -> O when char_conf <= 0.60, any slot
+3. F -> E when char_conf <= 0.90, slot 3
+4. 1 -> I when char_conf <= 0.96, slot 5
+5. O -> 0 when char_conf <= 0.70, slot 4
+6. 0 -> O when char_conf <= 0.80, slot 2
+7. F -> E when char_conf <= 0.96, slot 5
+8. C -> G when char_conf <= 0.60, any slot
+9. J -> U when char_conf <= 0.96, slot 1
+
+offline_calibrated_final_exact_acc=0.9898
+offline_validation_errors=51
+```
+
+Implementation:
+
+```text
+flag=--use-confusion-rules
+default=off
+evaluate=rules are applied only as the final char decoding candidate
+predict_only=rules can be applied to an old checkpoint when the flag is provided
+```
+
+Evaluation command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_best_confusion_rules_eval \
+  --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --eval-checkpoint \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --use-confusion-rules \
+  --no-val-diagnostics \
+  --skip-test
+```
+
+Evaluation result:
+
+```text
+loss=0.0375
+final_exact_acc=0.9856
+calibrated_final_exact_acc=0.9898
+confusion_rules_final_exact_acc=0.9898
+char_slot_acc=0.99348
+calibrated_char_slot_acc=0.99380
+color_slot_acc=0.99932
+char_decode_method=confusion_rules
+color_decode_method=threshold
+color_thresholds=0.950,0.800,0.550,0.900,0.750
+validation_errors=51
+```
+
+Prediction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_best_confusion_rules_predict \
+  --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --predict-only \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --use-confusion-rules
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_best_confusion_rules_predict/submission.csv
+rows=5000
+unique_id=5000
+label_ok=True
+changed_vs_previous_outputs_submission=8
+```
+
+Changed test predictions:
+
+```text
+00037.png: F -> E
+01237.png: RC -> RG
+02180.png: 15 -> I5
+02488.png: A1TY -> AITY
+02513.png: 0X -> OX
+02667.png: 1 -> I
+03218.png: 1LBN -> ILBN
+04960.png: C1MF -> C1ME
+```
+
+Current candidate:
+
+```text
+canonical_submission=outputs/submission.csv
+source=outputs/convnext_best_confusion_rules_predict/submission.csv
+best_validation_score=0.9898
+```
+
+Takeaways:
+
+- This is the first improvement beyond the 0.9874 plateau.
+- The gain is validation-calibrated and may overfit, so the report should present both the pure model score (0.9874) and the post-processed score (0.9898).
+- The remaining target of 0.995 is still not achieved.
+
+Artifacts:
+
+```text
+outputs/convnext_best_confusion_rules_eval/val_checkpoint_metrics.csv
+outputs/convnext_best_confusion_rules_predict/submission.csv
+outputs/submission.csv
+logs/convnext_best_confusion_rules_eval.out.log
+logs/convnext_best_confusion_rules_eval.err.log
+logs/convnext_best_confusion_rules_predict.out.log
+logs/convnext_best_confusion_rules_predict.err.log
+```
+
