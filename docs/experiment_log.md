@@ -3149,3 +3149,86 @@ logs/convnext_best_confusion_rules_contextual_diagnostics.out.log
 logs/convnext_best_confusion_rules_contextual_diagnostics.err.log
 ```
 
+## 2026-06-20 Confusion Rule Robustness Audit
+
+Motivation:
+
+- Contextual rules exceeded 0.995 on the fixed validation set, but they were tuned from validation errors.
+- I ran a robustness audit by splitting the 5000 validation predictions into two fixed halves, A/B, with seed 2026.
+- The audit compares fixed rule sets on both halves and also learns exact contextual rules on one half before evaluating them on the other half.
+
+Command:
+
+```bash
+python - <<PY
+# Reads outputs/convnext_192x576_pool_query_lr2e6_e1/val_predictions.csv
+# Writes outputs/confusion_rule_robustness_audit/rule_split_metrics.csv
+# Also writes learned_rules_none_A/B.csv and learned_rules_aggressive_A/B.csv
+PY
+```
+
+Fixed rule-set split metrics:
+
+```text
+none:
+  A=0.9868 errors=33
+  B=0.9880 errors=30
+  all=0.9874 errors=63
+
+conservative:
+  A=0.9884 errors=29
+  B=0.9912 errors=22
+  all=0.9898 errors=51
+
+aggressive:
+  A=0.9920 errors=20
+  B=0.9936 errors=16
+  all=0.9928 errors=36
+
+contextual:
+  A=0.9956 errors=11
+  B=0.9968 errors=8
+  all=0.9962 errors=19
+```
+
+Cross-fit learned-rule metrics:
+
+```text
+learn exact contextual from none on A:
+  train A=0.9960 errors=10
+  test B=0.9864 errors=34
+  all=0.9912 errors=44
+
+learn exact contextual from none on B:
+  train B=0.9968 errors=8
+  test A=0.9844 errors=39
+  all=0.9906 errors=47
+
+learn exact contextual from aggressive on A:
+  train A=0.9968 errors=8
+  test B=0.9916 errors=21
+  all=0.9942 errors=29
+
+learn exact contextual from aggressive on B:
+  train B=0.9968 errors=8
+  test A=0.9884 errors=29
+  all=0.9926 errors=37
+```
+
+Interpretation:
+
+- Fixed contextual rules score high on both halves because they were tuned using the whole validation set; this is contaminated for robustness estimation.
+- Cross-fit results show the exact contextual rule learner does not generalize to the unseen half at 0.995.
+- The safest report should treat 0.9874 as the pure model score, 0.9898/0.9928 as validation-tuned post-processing, and 0.9962 as a high-risk validation-specific upper candidate.
+- The canonical `outputs/submission.csv` remains the contextual candidate because the current optimization goal prioritizes the highest validation score, but the caveat must be explicit.
+
+Artifacts:
+
+```text
+outputs/confusion_rule_robustness_audit/rule_split_metrics.csv
+outputs/confusion_rule_robustness_audit/learned_rules_none_A.csv
+outputs/confusion_rule_robustness_audit/learned_rules_none_B.csv
+outputs/confusion_rule_robustness_audit/learned_rules_aggressive_A.csv
+outputs/confusion_rule_robustness_audit/learned_rules_aggressive_B.csv
+```
+
