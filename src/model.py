@@ -1,4 +1,5 @@
 import torch
+import torch.nn.functional as F
 from torch import nn
 from torchvision.models import (
     ConvNeXt_Small_Weights,
@@ -387,6 +388,155 @@ class PretrainedConvNeXtSlotModel(nn.Module):
         color_stats = torch.cat([raw_slots, red_avg, red_max], dim=-1)
         extra_color_stats = torch.cat([red_positive_avg, red_coverage], dim=-1)
         color_features = slot_features + self.color_stat_proj(color_stats) + self.extra_color_stat_proj(extra_color_stats)
+        if self.position_specific_heads:
+            char_logits = self.apply_slot_heads(slot_features, self.char_heads)
+            color_logits = self.apply_slot_heads(color_features, self.color_heads)
+        else:
+            char_logits = self.char_head(slot_features)
+            color_logits = self.color_head(color_features)
+        return char_logits, color_logits
+
+
+class SlotCropConvNeXtModel(nn.Module):
+    def __init__(
+        self,
+        feature_dim: int = 384,
+        head_hidden_dim: int = 384,
+        num_slots: int = 5,
+        num_chars: int = 36,
+        dropout: float = 0.1,
+        position_specific_heads: bool = True,
+        use_slot_context: bool = True,
+        pretrained: bool = True,
+        backbone_name: str = "convnext_tiny",
+        crop_size: tuple[int, int] = (96, 96),
+        crop_overlap: float = 0.08,
+    ):
+        super().__init__()
+        if backbone_name not in CONVNEXT_BACKBONES:
+            supported = ", ".join(sorted(CONVNEXT_BACKBONES))
+            raise ValueError(f"backbone_name must be one of {supported}; got {backbone_name!r}")
+        if num_slots <= 0:
+            raise ValueError("num_slots must be positive")
+        self.num_slots = num_slots
+        self.num_chars = num_chars
+        self.position_specific_heads = position_specific_heads
+        self.use_slot_context = use_slot_context
+        self.pretrained = pretrained
+        self.backbone_name = backbone_name
+        self.crop_size = crop_size
+        self.crop_overlap = float(crop_overlap)
+
+        backbone_factory, default_weights, backbone_dim = CONVNEXT_BACKBONES[backbone_name]
+        weights = default_weights if pretrained else None
+        convnext = backbone_factory(weights=weights)
+        self.backbone = convnext.features
+        self.feature_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.feature_projection = nn.Sequential(
+            nn.LayerNorm(backbone_dim),
+            nn.Linear(backbone_dim, feature_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.position_embedding = nn.Parameter(torch.zeros(1, num_slots, feature_dim))
+        self.color_stat_proj = nn.Sequential(
+            nn.Linear(5, feature_dim),
+            nn.GELU(),
+            nn.LayerNorm(feature_dim),
+        )
+        self.extra_color_stat_proj = nn.Linear(2, feature_dim, bias=False)
+        nn.init.zeros_(self.extra_color_stat_proj.weight)
+        self.slot_context = SlotContextBlock(feature_dim, dropout) if use_slot_context else nn.Identity()
+        if position_specific_heads:
+            self.char_heads = nn.ModuleList(
+                SlotHead(feature_dim, head_hidden_dim, num_chars, dropout)
+                for _ in range(num_slots)
+            )
+            self.color_heads = nn.ModuleList(
+                SlotHead(feature_dim, head_hidden_dim // 2, 2, dropout)
+                for _ in range(num_slots)
+            )
+        else:
+            self.char_head = SlotHead(feature_dim, head_hidden_dim, num_chars, dropout)
+            self.color_head = SlotHead(feature_dim, head_hidden_dim // 2, 2, dropout)
+
+    def apply_slot_heads(
+        self,
+        slot_features: torch.Tensor,
+        heads: nn.ModuleList,
+    ) -> torch.Tensor:
+        return torch.stack(
+            [head(slot_features[:, slot_idx, :]) for slot_idx, head in enumerate(heads)],
+            dim=1,
+        )
+
+    def denormalize_images(self, images: torch.Tensor) -> torch.Tensor:
+        mean = torch.as_tensor(
+            getattr(self, "input_mean", (0.485, 0.456, 0.406)),
+            dtype=images.dtype,
+            device=images.device,
+        ).flatten()
+        std = torch.as_tensor(
+            getattr(self, "input_std", (0.229, 0.224, 0.225)),
+            dtype=images.dtype,
+            device=images.device,
+        ).flatten().clamp_min(1e-6)
+        if mean.numel() == 1:
+            mean = mean.expand(images.size(1))
+        if std.numel() == 1:
+            std = std.expand(images.size(1))
+        mean = mean[: images.size(1)].view(1, -1, 1, 1)
+        std = std[: images.size(1)].view(1, -1, 1, 1)
+        return (images * std + mean).clamp(0.0, 1.0)
+
+    def crop_slots(self, images: torch.Tensor) -> torch.Tensor:
+        width = images.size(-1)
+        slot_width = width / float(self.num_slots)
+        overlap = max(0.0, self.crop_overlap) * slot_width
+        crops = []
+        for slot_idx in range(self.num_slots):
+            left = max(0, int(round(slot_idx * slot_width - overlap)))
+            right = min(width, int(round((slot_idx + 1) * slot_width + overlap)))
+            if right <= left:
+                right = min(width, left + 1)
+            crop = images[:, :, :, left:right]
+            crop = F.interpolate(
+                crop,
+                size=self.crop_size,
+                mode="bilinear",
+                align_corners=False,
+            )
+            crops.append(crop)
+        return torch.stack(crops, dim=1)
+
+    def forward(self, images: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size = images.size(0)
+        crops = self.crop_slots(images)
+        flat_crops = crops.view(batch_size * self.num_slots, images.size(1), *self.crop_size)
+        features = self.backbone(flat_crops)
+        features = self.feature_pool(features).flatten(1)
+        slot_features = self.feature_projection(features).view(batch_size, self.num_slots, -1)
+        slot_features = slot_features + self.position_embedding
+        slot_features = self.slot_context(slot_features)
+
+        color_crops = self.denormalize_images(flat_crops)
+        raw_mean = color_crops.mean(dim=(2, 3))
+        red_minus_other = color_crops[:, 0:1] - torch.maximum(color_crops[:, 1:2], color_crops[:, 2:3])
+        red_avg = red_minus_other.mean(dim=(2, 3))
+        red_max = red_minus_other.flatten(2).max(dim=-1).values
+        red_positive_avg = red_minus_other.clamp_min(0.0).mean(dim=(2, 3))
+        red_coverage = (red_minus_other > 0.15).to(images.dtype).mean(dim=(2, 3))
+        color_stats = torch.cat([raw_mean, red_avg, red_max], dim=-1).view(batch_size, self.num_slots, -1)
+        extra_color_stats = torch.cat([red_positive_avg, red_coverage], dim=-1).view(
+            batch_size,
+            self.num_slots,
+            -1,
+        )
+        color_features = (
+            slot_features
+            + self.color_stat_proj(color_stats)
+            + self.extra_color_stat_proj(extra_color_stats)
+        )
         if self.position_specific_heads:
             char_logits = self.apply_slot_heads(slot_features, self.char_heads)
             color_logits = self.apply_slot_heads(color_features, self.color_heads)

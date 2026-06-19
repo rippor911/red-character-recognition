@@ -29,7 +29,7 @@ from data import (
     validate_test_frame,
     validate_train_frame,
 )
-from model import BaselineCNN, PretrainedConvNeXtSlotModel
+from model import BaselineCNN, PretrainedConvNeXtSlotModel, SlotCropConvNeXtModel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,7 +125,11 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-color-class-weight", action="store_true")
     parser.add_argument("--max-color-class-weight", type=float, default=3.0)
     parser.add_argument("--max-grad-norm", type=float, default=5.0)
-    parser.add_argument("--model", choices=["baseline_cnn", "convnext_tiny", "convnext_small"], default="baseline_cnn")
+    parser.add_argument(
+        "--model",
+        choices=["baseline_cnn", "convnext_tiny", "convnext_small", "slot_crop_convnext_tiny"],
+        default="baseline_cnn",
+    )
     parser.add_argument("--no-pretrained-backbone", action="store_true")
     parser.add_argument("--feature-dim", type=int, default=384)
     parser.add_argument("--dropout", type=float, default=0.1)
@@ -276,6 +280,17 @@ def build_model(
             pretrained=pretrained_backbone,
             slot_extractor=slot_extractor,
             backbone_name=model_name,
+        )
+    if model_name == "slot_crop_convnext_tiny":
+        return SlotCropConvNeXtModel(
+            num_chars=num_chars,
+            feature_dim=feature_dim,
+            dropout=dropout,
+            head_hidden_dim=head_hidden_dim,
+            position_specific_heads=position_specific_heads,
+            use_slot_context=use_slot_context,
+            pretrained=pretrained_backbone,
+            backbone_name="convnext_tiny",
         )
     raise ValueError(f"unknown model_name: {model_name}")
 

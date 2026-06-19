@@ -2197,3 +2197,90 @@ logs/ensemble_tiny3_tta_eval.out.log
 logs/ensemble_tiny3_tta_eval.err.log
 ```
 
+## 2026-06-19 Slot-Crop ConvNeXt-Tiny Specialist Integration
+
+Motivation:
+
+- Current best errors are mostly local glyph confusions such as `I/1`, `O/0`, and `Q/O`.
+- Whole-image slot pooling may dilute fine stroke details at each character position.
+- I added a specialist model that crops the five fixed character slots from the full image, resizes each crop to a square patch, and applies a shared ImageNet-pretrained ConvNeXt-Tiny backbone to every slot.
+
+Implementation:
+
+```text
+model=slot_crop_convnext_tiny
+input=[B,3,H,W]
+crop=split width into 5 overlapped slots
+slot_crop_size=96x96
+shared_backbone=TorchVision ConvNeXt-Tiny ImageNet1K
+heads=position-specific char/color heads
+output_char_logits=[B,5,36]
+output_color_logits=[B,5,2]
+```
+
+Shape check:
+
+```text
+input_shape=(2, 3, 192, 576)
+char_logits_shape=(2, 5, 36)
+color_logits_shape=(2, 5, 2)
+model_params=29,458,270
+```
+
+Smoke command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/slot_crop_smoke \
+  --checkpoint-dir checkpoints/slot_crop_smoke \
+  --model slot_crop_convnext_tiny \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 1e-4 \
+  --epochs 1 \
+  --batch-size 2 \
+  --num-workers 0 \
+  --device cuda \
+  --debug-overfit \
+  --debug-samples 8 \
+  --skip-test
+```
+
+Smoke result:
+
+```text
+train_loss=4.2672
+debug_train_loss=3.9251
+calibrated_final_exact_acc=0.1250
+char_slot_acc=0.3750
+color_slot_acc=0.7250
+checkpoint_saved=checkpoints/slot_crop_smoke/baseline_best.pt
+```
+
+Next run:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/slot_crop_192x576_e2 \
+  --checkpoint-dir checkpoints/slot_crop_192x576_e2 \
+  --model slot_crop_convnext_tiny \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 1e-4 \
+  --epochs 2 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5
+```
+
+Expected value:
+
+- This is a more diverse model than the near-identical Tiny checkpoints used in the logit ensemble.
+- If it learns complementary character decisions, it can be ensembled later with the whole-image model.
+
