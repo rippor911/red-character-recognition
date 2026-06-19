@@ -2551,3 +2551,57 @@ logs/convnext_224x672_pool_query_e1.out.log
 logs/convnext_224x672_pool_query_e1.err.log
 ```
 
+## 2026-06-20 Current Best Fine Threshold Scan
+
+Motivation:
+
+- The best checkpoint uses validation-time threshold calibration for red slot decoding.
+- I re-evaluated the current best with a finer threshold grid to see whether color calibration can recover any of the remaining 63 validation errors.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_best_threshold91_eval \
+  --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --eval-checkpoint \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --threshold-steps 91 \
+  --no-val-diagnostics \
+  --skip-test
+```
+
+Result:
+
+```text
+loss=0.0375
+final_exact_acc=0.9856
+calibrated_final_exact_acc=0.9874
+char_slot_acc=0.9935
+color_slot_acc=0.9993
+color_pattern_acc=0.9968
+decode=threshold
+color_thresholds=0.930,0.770,0.540,0.890,0.710
+```
+
+Takeaways:
+
+- Finer color-threshold scanning did not improve over the stored 0.9874 score.
+- Remaining errors are not primarily due to coarse red-threshold calibration.
+
+Artifacts:
+
+```text
+outputs/convnext_best_threshold91_eval/val_checkpoint_metrics.csv
+logs/convnext_best_threshold91_eval.out.log
+logs/convnext_best_threshold91_eval.err.log
+```
+
