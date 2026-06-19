@@ -2284,3 +2284,79 @@ Expected value:
 - This is a more diverse model than the near-identical Tiny checkpoints used in the logit ensemble.
 - If it learns complementary character decisions, it can be ensembled later with the whole-image model.
 
+Formal run result:
+
+```text
+epoch=1
+selected_model=raw
+train_loss=1.5411
+val_loss=0.1689
+calibrated_final_exact_acc=0.9152
+char_slot_acc=0.9604
+color_slot_acc=0.9955
+
+epoch=2
+selected_model=ema
+train_loss=0.6363
+val_loss=0.0938
+final_exact_acc=0.9484
+threshold_final_exact_acc=0.9538
+calibrated_final_exact_acc=0.9542
+char_slot_acc=0.9789
+char_sequence_acc=0.9000
+color_slot_acc=0.9980
+color_pattern_acc=0.9900
+char_oracle_final_exact_acc=0.9956
+color_oracle_final_exact_acc=0.9580
+```
+
+Comparison:
+
+```text
+current_best_single=0.9874
+slot_crop_192x576_E2=0.9542
+gain_vs_current_best=-0.0332
+validation_errors=200
+```
+
+Validation error analysis:
+
+```text
+errors=200
+char_all_wrong=184
+color_wrong=21
+length_wrong=21
+top_confusions=O->0:12, E->F:8, I->1:5, Q->O:5, R->P:4, L->I:4, 2->Z:3, V->J:3, U->J:3, 0->O:3, T->I:3, 1->7:3
+```
+
+Complementarity check:
+
+```text
+tiny_best=0.9874
+slot_crop=0.9542
+small=0.9738
+tiny_160=0.9860
+tiny_192=0.9866
+oracle(tiny_best,slot_crop)=0.9900
+oracle(tiny_best,slot_crop,small)=0.9916
+oracle(tiny_best,slot_crop,small,tiny_160,tiny_192)=0.9932
+```
+
+Takeaways:
+
+- Slot-crop is not competitive after two epochs, but it is still learning rapidly.
+- Its errors are partly complementary to the current whole-image best, so a stronger slot-crop checkpoint may become useful for a diverse ensemble.
+- Continue from `checkpoints/slot_crop_192x576_e2/baseline_best.pt` with a lower learning rate instead of abandoning it after two epochs.
+
+Artifacts:
+
+```text
+checkpoints/slot_crop_192x576_e2/baseline_best.pt
+outputs/slot_crop_192x576_e2/training_history.csv
+outputs/slot_crop_192x576_e2/val_predictions.csv
+outputs/slot_crop_192x576_e2/val_errors.csv
+outputs/slot_crop_192x576_e2/submission.csv
+logs/slot_crop_192x576_e2.out.log
+logs/slot_crop_192x576_e2.err.log
+```
+
