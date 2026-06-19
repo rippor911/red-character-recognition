@@ -2360,3 +2360,100 @@ logs/slot_crop_192x576_e2.out.log
 logs/slot_crop_192x576_e2.err.log
 ```
 
+## 2026-06-19 Slot-Crop ConvNeXt-Tiny Low-LR Continuation E3
+
+Motivation:
+
+- Slot-crop E2 was weak at 0.9542 but still climbing quickly.
+- I continued from the E2 checkpoint with a lower fixed learning rate to test whether the specialist model can become a useful diverse ensemble member.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/slot_crop_192x576_lr5e5_e3 \
+  --checkpoint-dir checkpoints/slot_crop_192x576_lr5e5_e3 \
+  --init-checkpoint checkpoints/slot_crop_192x576_e2/baseline_best.pt \
+  --model slot_crop_convnext_tiny \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 5e-5 \
+  --epochs 3 \
+  --batch-size 16 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
+Result:
+
+```text
+epoch=1 calibrated_final_exact_acc=0.9630 char_slot_acc=0.9815 color_slot_acc=0.9989
+epoch=2 calibrated_final_exact_acc=0.9666 char_slot_acc=0.9841 color_slot_acc=0.9989
+epoch=3 calibrated_final_exact_acc=0.9706 char_slot_acc=0.9848 color_slot_acc=0.9992
+best_epoch=3
+selected_model=ema
+final_exact_acc=0.9700
+threshold_final_exact_acc=0.9706
+color_thresholds=0.500,0.550,0.950,0.750,0.500
+```
+
+Validation error analysis:
+
+```text
+errors=147
+char_all_wrong=136
+color_wrong=15
+length_wrong=15
+top_confusions=I->1:9, O->0:7, Q->O:5, E->F:5, 0->O:4, T->I:3, J->U:3, R->P:3, E->Z:2, 7->1:2, 2->Z:2, S->5:2
+```
+
+Complementarity check:
+
+```text
+tiny_best=0.9874
+slot_crop_e5=0.9706
+small=0.9738
+tiny_160=0.9860
+tiny_192=0.9866
+tiny_poolq_e2=0.9870
+tiny_lr1=0.9874
+oracle(tiny_best,slot_crop_e5)=0.9906
+oracle(tiny_best,slot_crop_e5,small)=0.9918
+oracle(tiny_best,slot_crop_e5,small,tiny_160,tiny_192)=0.9932
+oracle(all_listed)=0.9932
+majority(tiny_best,slot_crop_e5,small)=0.9840
+majority(all_listed)=0.9864
+```
+
+Submission check:
+
+```text
+path=outputs/slot_crop_192x576_lr5e5_e3/submission.csv
+rows=5000
+unique_id=5000
+label_ok=True
+```
+
+Takeaways:
+
+- Slot-crop improved from 0.9542 to 0.9706 but remains far below the whole-image ConvNeXt-Tiny best.
+- It adds a little complementary signal, but naive majority voting is worse than the single best model.
+- Continue only if using it as a specialized auxiliary model; the production submission remains the 0.9874 whole-image model.
+
+Artifacts:
+
+```text
+checkpoints/slot_crop_192x576_lr5e5_e3/baseline_best.pt
+outputs/slot_crop_192x576_lr5e5_e3/training_history.csv
+outputs/slot_crop_192x576_lr5e5_e3/val_predictions.csv
+outputs/slot_crop_192x576_lr5e5_e3/val_errors.csv
+outputs/slot_crop_192x576_lr5e5_e3/submission.csv
+logs/slot_crop_192x576_lr5e5_e3.out.log
+logs/slot_crop_192x576_lr5e5_e3.err.log
+```
+
