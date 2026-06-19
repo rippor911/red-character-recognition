@@ -1538,3 +1538,140 @@ python -u src/main.py \
   --color-loss-weight 0.5
 ```
 
+## 2026-06-19 192x576 Pool-Query Low-LR Polish E1
+
+Motivation:
+
+- The high-resolution pool_query run became the best model at 0.9870.
+- I tested a short low-learning-rate continuation to see whether the newly active query/fusion path had more room to settle.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_pool_query_lr2e6_e1 \
+  --checkpoint-dir checkpoints/convnext_192x576_pool_query_lr2e6_e1 \
+  --init-checkpoint checkpoints/convnext_192x576_pool_query_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 2e-6 \
+  --epochs 1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
+Best result:
+
+```text
+epoch=1
+selected_model=ema
+train_loss=0.3837
+val_loss=0.0375
+final_exact_acc=0.9856
+threshold_final_exact_acc=0.9874
+calibrated_final_exact_acc=0.9874
+char_slot_acc=0.99350
+char_sequence_acc=0.9676
+color_slot_acc=0.99930
+color_pattern_acc=0.9968
+char_oracle_final_exact_acc=0.9988
+color_oracle_final_exact_acc=0.9886
+color_thresholds=0.950,0.800,0.550,0.900,0.750
+```
+
+Comparison:
+
+```text
+BaselineCNN_E5=0.9188
+ConvNeXt_192x576_pool_query_E2=0.9870
+ConvNeXt_192x576_pool_query_lr2e6_E1=0.9874
+gain_vs_baseline=+0.0686
+gain_vs_previous_best=+0.0004
+baseline_error=0.0812
+current_error=0.0126
+relative_error_reduction_vs_baseline=(0.0812 - 0.0126) / 0.0812 = 84.5%
+target_relative_error_reduction=15.0%
+target_met=True
+```
+
+Validation error analysis:
+
+```text
+errors=63
+char_all_wrong=58
+color_wrong=7
+length_wrong=6
+top_confusions=I->1:5, O->0:4, Q->O:3, E->F:3, 1->I:3, L->I:2, 0->O:2, J->I:2, O->Q:2, G->C:2
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_192x576_pool_query_lr2e6_e1/submission.csv
+columns=id,label
+rows=5000
+unique_ids=5000
+labels_match_[0-9A-Z]{1,5}=True
+```
+
+Takeaways:
+
+- Low-learning-rate polishing on top of pool_query gives another small positive gain.
+- The remaining errors are still mostly character confusions; color/length errors stay low but are not fully eliminated.
+- Current best is now 0.9874, or 63 validation errors out of 5000.
+
+Artifacts:
+
+```text
+checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt
+outputs/convnext_192x576_pool_query_lr2e6_e1/training_history.csv
+outputs/convnext_192x576_pool_query_lr2e6_e1/val_predictions.csv
+outputs/convnext_192x576_pool_query_lr2e6_e1/val_errors.csv
+outputs/convnext_192x576_pool_query_lr2e6_e1/submission.csv
+logs/convnext_192x576_pool_query_lr2e6_e1.out.log
+logs/convnext_192x576_pool_query_lr2e6_e1.err.log
+```
+
+## Updated Current Best 8
+
+```text
+best_model=ConvNeXt-Tiny pretrained + avgmax pooled slots + pool_query FRM-lite + 192x576 input + checkpoint fine-tuning + character-weighted loss + low-lr polish
+checkpoint=checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt
+submission=outputs/convnext_192x576_pool_query_lr2e6_e1/submission.csv
+calibrated_final_exact_acc=0.9874
+baseline_calibrated_final_exact_acc=0.9188
+absolute_gain=+0.0686
+relative_error_reduction=84.5%
+```
+
+Recommended reproduction command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_pool_query_lr2e6_e1 \
+  --checkpoint-dir checkpoints/convnext_192x576_pool_query_lr2e6_e1 \
+  --init-checkpoint checkpoints/convnext_192x576_pool_query_e2/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 2e-6 \
+  --epochs 1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
