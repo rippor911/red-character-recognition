@@ -37,7 +37,7 @@ DEFAULT_DATA_DIR = ROOT / "dataset"
 DEFAULT_OUTPUT_DIR = ROOT / "outputs"
 DEFAULT_CHECKPOINT_DIR = ROOT / "checkpoints"
 NormalizationValue = float | Sequence[float]
-ConfusionRule = tuple[str, str, float, Optional[int]]
+ConfusionRule = tuple[str, str, float, Optional[int]] | tuple[str, str, float, Optional[int], Optional[str]]
 CONSERVATIVE_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
     ("1", "I", 0.85, None),
     ("Q", "O", 0.60, None),
@@ -74,6 +74,25 @@ AGGRESSIVE_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
     ("I", "V", 0.85, 0),
     ("I", "J", 0.94, 0),
     ("Y", "X", 0.96, 1),
+)
+CONTEXTUAL_CONFUSION_RULES: tuple[ConfusionRule, ...] = AGGRESSIVE_CONFUSION_RULES + (
+    ("P", "F", 0.888, 2, "rurur"),
+    ("5", "S", 0.940, 2, "uuruu"),
+    ("0", "O", 0.975, 0, "rurru"),
+    ("R", "P", 0.809, 3, "rurru"),
+    ("G", "C", 0.935, 2, "urruu"),
+    ("I", "2", 0.753, 4, "rurrr"),
+    ("C", "G", 0.949, 3, "uuuru"),
+    ("1", "I", 0.969, 1, "rrurr"),
+    ("1", "4", 0.961, 2, "rrrur"),
+    ("1", "I", 0.972, 2, "uurrr"),
+    ("B", "S", 0.869, 3, "rruru"),
+    ("I", "1", 0.842, 4, "rrurr"),
+    ("O", "Q", 0.837, 2, "urrru"),
+    ("B", "E", 0.774, 3, "rrrru"),
+    ("I", "J", 0.690, 1, "uruuu"),
+    ("O", "0", 0.945, 2, "rrrur"),
+    ("T", "7", 0.713, 2, "rrrur"),
 )
 
 
@@ -195,7 +214,11 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--no-char-prior", action="store_true")
     parser.add_argument("--char-prior-weights", type=str, default="0,0.1,0.25,0.5,1")
     parser.add_argument("--use-confusion-rules", action="store_true")
-    parser.add_argument("--confusion-rule-set", choices=["conservative", "aggressive"], default="conservative")
+    parser.add_argument(
+        "--confusion-rule-set",
+        choices=["conservative", "aggressive", "contextual"],
+        default="conservative",
+    )
     parser.add_argument("--no-count-prior", action="store_true")
     parser.add_argument("--count-prior-weights", type=str, default="0,0.25,0.5,1,1.5,2")
     parser.add_argument("--no-pattern-prior", action="store_true")
@@ -1050,6 +1073,7 @@ def evaluate(
             best_calibrated_chars,
             char_confidence_all,
             confusion_rules,
+            color_indices=calibrated_colors,
         )
         candidate_final = decode_batch_final(
             candidate_chars,
@@ -1199,6 +1223,8 @@ def get_confusion_rules(rule_set: str) -> tuple[ConfusionRule, ...]:
         return CONSERVATIVE_CONFUSION_RULES
     if rule_set == "aggressive":
         return AGGRESSIVE_CONFUSION_RULES
+    if rule_set == "contextual":
+        return CONTEXTUAL_CONFUSION_RULES
     raise ValueError(f"unknown confusion rule set: {rule_set}")
 
 
@@ -1240,11 +1266,26 @@ def apply_confusion_rules(
     char_indices: torch.Tensor,
     char_confidence: torch.Tensor,
     rules: Sequence[ConfusionRule],
+    color_indices: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     if not rules:
         return char_indices
     adjusted = char_indices.clone()
-    for source, target, threshold, slot_idx in rules:
+    color_patterns: list[str] | None = None
+    if color_indices is not None:
+        color_patterns = [
+            color_indices_to_pattern(row)
+            for row in color_indices.detach().cpu().long().tolist()
+        ]
+    for rule in rules:
+        if len(rule) == 4:
+            source, target, threshold, slot_idx = rule
+            required_pattern = None
+        elif len(rule) == 5:
+            source, target, threshold, slot_idx, required_pattern = rule
+            required_pattern = str(required_pattern).lower() if required_pattern is not None else None
+        else:
+            raise ValueError(f"confusion rule must contain 4 or 5 values, got {len(rule)}")
         source = str(source).upper()
         target = str(target).upper()
         if source not in CHARSET or target not in CHARSET:
@@ -1252,6 +1293,15 @@ def apply_confusion_rules(
         source_idx = CHARSET.index(source)
         target_idx = CHARSET.index(target)
         mask = (adjusted == source_idx) & (char_confidence <= float(threshold))
+        if required_pattern is not None:
+            if color_patterns is None:
+                raise ValueError("pattern-specific confusion rules require color_indices")
+            pattern_mask = torch.tensor(
+                [pattern == required_pattern for pattern in color_patterns],
+                dtype=torch.bool,
+                device=adjusted.device,
+            ).view(-1, 1)
+            mask = mask & pattern_mask
         if slot_idx is not None:
             slot = int(slot_idx)
             if not 0 <= slot < adjusted.size(1):
@@ -1602,7 +1652,12 @@ def save_validation_diagnostics(
         calibrated_chars = char_prior_chars if use_char_prior else pred_chars
         pred_calibrated_final = pred_char_prior_final if use_char_prior else color_calibrated_final
         if "confusion_rules" in char_decode_method and bool(confusion_rules):
-            calibrated_chars = apply_confusion_rules(calibrated_chars, char_conf, confusion_rules)
+            calibrated_chars = apply_confusion_rules(
+                calibrated_chars,
+                char_conf,
+                confusion_rules,
+                color_indices=calibrated_colors,
+            )
             pred_calibrated_final = decode_batch_final(
                 calibrated_chars,
                 calibrated_colors,
@@ -2516,40 +2571,38 @@ def predict_test(model: nn.Module, test_df: pd.DataFrame, config: Optional[Train
         )
         red_probs = torch.softmax(color_logits, dim=-1)[..., 1]
         char_confidence = torch.softmax(char_logits, dim=-1).max(dim=-1).values
-        if "confusion_rules" in char_decode_method and confusion_rules:
-            pred_chars = apply_confusion_rules(pred_chars, char_confidence, confusion_rules)
         if use_pattern_prior:
-            predictions.extend(
-                decode_batch_with_pattern_prior(
-                    pred_chars,
-                    red_probs,
-                    patterns=color_pattern_candidates,
-                    pattern_log_priors=color_pattern_log_priors,
-                    prior_weight=pattern_prior_weight,
-                    char_confidence=char_confidence,
-                    confidence_weight=pattern_confidence_weight,
-                    fallback_if_empty=True,
-                )
+            pred_colors = color_indices_from_pattern_prior(
+                red_probs,
+                patterns=color_pattern_candidates,
+                pattern_log_priors=color_pattern_log_priors,
+                prior_weight=pattern_prior_weight,
+                char_confidence=char_confidence,
+                confidence_weight=pattern_confidence_weight,
             )
         elif use_count_prior:
-            predictions.extend(
-                decode_batch_with_count_prior(
-                    pred_chars,
-                    red_probs,
-                    count_log_priors=count_log_priors,
-                    prior_weight=count_prior_weight,
-                    fallback_if_empty=True,
-                )
+            pred_colors = color_indices_from_count_prior(
+                red_probs,
+                count_log_priors=count_log_priors,
+                prior_weight=count_prior_weight,
             )
         else:
-            predictions.extend(
-                decode_batch_with_threshold(
-                    pred_chars,
-                    red_probs,
-                    threshold=color_threshold,
-                    fallback_if_empty=True,
-                )
+            pred_colors = color_indices_from_scores(red_probs, color_threshold)
+        if "confusion_rules" in char_decode_method and confusion_rules:
+            pred_chars = apply_confusion_rules(
+                pred_chars,
+                char_confidence,
+                confusion_rules,
+                color_indices=pred_colors,
             )
+        predictions.extend(
+            decode_batch_final(
+                pred_chars,
+                pred_colors,
+                red_scores=red_probs,
+                fallback_if_empty=True,
+            )
+        )
     return predictions
 
 

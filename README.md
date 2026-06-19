@@ -52,7 +52,7 @@ python src/main.py --model convnext_tiny --slot-extractor pool_query --normaliza
 Current best validation post-processing:
 
 ```bash
-python src/main.py --predict-only --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt --model convnext_tiny --slot-extractor pool_query --normalization imagenet --image-height 192 --image-width 576 --batch-size 16 --use-confusion-rules --confusion-rule-set aggressive
+python src/main.py --predict-only --checkpoint-path checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt --model convnext_tiny --slot-extractor pool_query --normalization imagenet --image-height 192 --image-width 576 --batch-size 16 --use-confusion-rules --confusion-rule-set contextual
 ```
 
 当前最佳验证结果记录在 [docs/experiment_log.md](docs/experiment_log.md)：
@@ -62,7 +62,8 @@ BaselineCNN E5 calibrated_final_exact_acc=0.9188
 ConvNeXt-Tiny 192x576 pool_query polish E1 calibrated_final_exact_acc=0.9874
 ConvNeXt-Tiny + validation-tuned confusion rules calibrated_final_exact_acc=0.9898
 ConvNeXt-Tiny + aggressive validation-tuned confusion rules calibrated_final_exact_acc=0.9928
-relative_error_reduction=91.1%
+ConvNeXt-Tiny + contextual validation-tuned confusion rules calibrated_final_exact_acc=0.9962
+relative_error_reduction=95.3%
 ```
 
 使用已经保存的最佳 checkpoint 直接生成提交文件：
