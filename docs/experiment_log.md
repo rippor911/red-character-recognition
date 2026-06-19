@@ -2023,3 +2023,77 @@ Expected value:
 - This is not directly initialized from the current Tiny checkpoint because backbone shapes differ.
 - The first two epochs should tell whether the larger backbone can beat the 0.9874 plateau after a longer run or whether it needs a lower LR/frozen-backbone warmup.
 
+Formal run result:
+
+```text
+epoch=1
+selected_model=ema
+train_loss=1.0728
+val_loss=0.0673
+calibrated_final_exact_acc=0.9732
+char_slot_acc=0.9881
+color_slot_acc=0.9991
+
+epoch=2
+selected_model=ema
+train_loss=0.5660
+val_loss=0.0711
+final_exact_acc=0.9728
+threshold_final_exact_acc=0.9738
+calibrated_final_exact_acc=0.9738
+char_slot_acc=0.9898
+char_sequence_acc=0.9496
+color_slot_acc=0.9983
+color_pattern_acc=0.9918
+char_oracle_final_exact_acc=0.9928
+color_oracle_final_exact_acc=0.9808
+```
+
+Comparison:
+
+```text
+ConvNeXt_192x576_pool_query_lr2e6_E1=0.9874
+ConvNeXt_Small_160x480_pool_query_E2=0.9738
+gain_vs_current_best=-0.0136
+validation_errors=131
+```
+
+Validation error analysis:
+
+```text
+errors=131
+char_all_wrong=100
+color_wrong=36
+length_wrong=36
+top_confusions=O->0:10, I->1:6, Q->O:6, E->F:5, R->P:4, 3->8:4, L->I:3, 0->O:3, 1->I:3, S->5:2, 9->8:2, P->R:2
+```
+
+Submission check:
+
+```text
+path=outputs/convnext_small_160x480_pool_query_e2/submission.csv
+columns=id,label
+rows=5000
+unique_id=5000
+label_ok=True
+```
+
+Takeaways:
+
+- ConvNeXt-Small is deployable on the local RTX 4060, using about 5.0GB GPU memory at `160x480` with batch size 4.
+- Directly training the larger backbone from ImageNet did not beat the tuned ConvNeXt-Tiny pipeline within two epochs.
+- The current best remains `checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt`.
+- The next better direction is likely checkpoint ensembling or targeted ambiguous-character calibration, not simply increasing backbone size.
+
+Artifacts:
+
+```text
+checkpoints/convnext_small_160x480_pool_query_e2/baseline_best.pt
+outputs/convnext_small_160x480_pool_query_e2/training_history.csv
+outputs/convnext_small_160x480_pool_query_e2/val_predictions.csv
+outputs/convnext_small_160x480_pool_query_e2/val_errors.csv
+outputs/convnext_small_160x480_pool_query_e2/submission.csv
+logs/convnext_small_160x480_pool_query_e2.out.log
+logs/convnext_small_160x480_pool_query_e2.err.log
+```
+
