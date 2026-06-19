@@ -1675,3 +1675,88 @@ python -u src/main.py \
   --no-scheduler
 ```
 
+## 2026-06-19 192x576 Pool-Query LR1e-6 Plateau E1
+
+Motivation:
+
+- The previous pool_query low-lr polish reached 0.9874.
+- I tested an even smaller learning rate to see whether the model could keep improving or had reached a plateau.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs/convnext_192x576_pool_query_lr1e6_e1 \
+  --checkpoint-dir checkpoints/convnext_192x576_pool_query_lr1e6_e1 \
+  --init-checkpoint checkpoints/convnext_192x576_pool_query_lr2e6_e1/baseline_best.pt \
+  --model convnext_tiny \
+  --slot-extractor pool_query \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --learning-rate 1e-6 \
+  --epochs 1 \
+  --batch-size 8 \
+  --num-workers 2 \
+  --device cuda \
+  --char-loss-weight 1.5 \
+  --color-loss-weight 0.5 \
+  --no-scheduler
+```
+
+Result:
+
+```text
+epoch=1
+selected_model=ema
+train_loss=0.3758
+val_loss=0.0378
+final_exact_acc=0.9860
+threshold_final_exact_acc=0.9874
+calibrated_final_exact_acc=0.9874
+char_slot_acc=0.99360
+char_sequence_acc=0.9686
+color_slot_acc=0.99950
+color_pattern_acc=0.9974
+char_oracle_final_exact_acc=0.9988
+color_oracle_final_exact_acc=0.9886
+```
+
+Comparison:
+
+```text
+ConvNeXt_192x576_pool_query_lr2e6_E1=0.9874
+ConvNeXt_192x576_pool_query_lr1e6_E1=0.9874
+gain_vs_previous_best=+0.0000
+validation_errors=63
+```
+
+Validation error analysis:
+
+```text
+errors=63
+char_all_wrong=57
+color_wrong=6
+length_wrong=6
+top_confusions=I->1:5, O->0:4, 0->O:3, Q->O:3, E->F:3, 1->I:3
+```
+
+Takeaways:
+
+- Reducing the learning rate to 1e-6 did not improve exact accuracy beyond 0.9874.
+- The model appears to be near a plateau for this training recipe.
+- Further gains likely need a new source of information or a targeted treatment for ambiguous glyph pairs.
+
+Artifacts:
+
+```text
+checkpoints/convnext_192x576_pool_query_lr1e6_e1/baseline_best.pt
+outputs/convnext_192x576_pool_query_lr1e6_e1/training_history.csv
+outputs/convnext_192x576_pool_query_lr1e6_e1/val_predictions.csv
+outputs/convnext_192x576_pool_query_lr1e6_e1/val_errors.csv
+outputs/convnext_192x576_pool_query_lr1e6_e1/submission.csv
+logs/convnext_192x576_pool_query_lr1e6_e1.out.log
+logs/convnext_192x576_pool_query_lr1e6_e1.err.log
+```
+
