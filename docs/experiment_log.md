@@ -3283,8 +3283,6 @@ Artifacts:
 
 ```text
 outputs/convnext_best_dense_tta_eval/val_checkpoint_metrics.csv
-outputs/convnext_best_dense_tta_eval/val_checkpoint_predictions.csv
-outputs/convnext_best_dense_tta_eval/val_checkpoint_errors.csv
 logs/convnext_best_dense_tta_eval.out.log
 logs/convnext_best_dense_tta_eval.err.log
 ```
@@ -3364,4 +3362,50 @@ outputs/slot_crop_192x576_lr2e5_e8/submission.csv
 logs/slot_crop_192x576_lr2e5_e8.out.log
 logs/slot_crop_192x576_lr2e5_e8.err.log
 ```
+
+## 2026-06-20 Train-Split Confusion Rule Learner
+
+Purpose:
+
+- Move away from hand-picking validation errors for character confusion rules.
+- Add a reproducible path that learns candidate rules from labeled train-split predictions and evaluates those fixed rules on the validation split.
+
+Code changes:
+
+```text
+src/main.py
+  Added --eval-split for --eval-checkpoint.
+  Supported values: val, train, all_train, debug_train.
+
+src/learn_confusion_rules.py
+  Reads exported prediction CSVs.
+  Generates source->target character replacement candidates from train prediction errors.
+  Scores each candidate by fixed minus broken train examples.
+  Applies selected rules to the validation prediction CSV and writes metrics.
+```
+
+Self-test command:
+
+```bash
+python src/learn_confusion_rules.py \
+  --train-predictions outputs\convnext_192x576_pool_query_lr2e6_e1\val_predictions.csv \
+  --val-predictions outputs\convnext_192x576_pool_query_lr2e6_e1\val_predictions.csv \
+  --output-dir outputs\rule_learner_selftest \
+  --min-gain 2 \
+  --max-rules 20
+```
+
+Self-test result:
+
+```text
+Candidates: 489
+Selected rules: 4
+Train base_acc=0.9874 rule_acc=0.9888 net_gain=7
+Val base_acc=0.9874 rule_acc=0.9888 net_gain=7 fixed=7 broken=0
+```
+
+Important caveat:
+
+- The self-test uses the same validation CSV as both train and val only to verify the script mechanics.
+- The real experiment must first export train-split predictions from the best checkpoint with `--eval-checkpoint --eval-split train`, then learn rules from those train predictions and evaluate them on the fixed validation prediction CSV.
 

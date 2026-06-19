@@ -86,6 +86,25 @@ python src/main.py --model convnext_tiny --normalization imagenet --init-checkpo
 python src/main.py --eval-checkpoint --checkpoint-path checkpoints/baseline_best.pt --skip-test
 ```
 
+Evaluate a different labeled split with the same checkpoint:
+
+```bash
+python src/main.py --eval-checkpoint --eval-split train --checkpoint-path checkpoints/baseline_best.pt --skip-test
+```
+
+`--eval-split` supports `val`, `train`, `all_train`, and `debug_train`. This is mainly used for exporting train-split prediction CSVs before learning systematic confusion rules.
+
+Learn confusion rules from prediction CSVs:
+
+```bash
+python src/learn_confusion_rules.py \
+  --train-predictions outputs/train_checkpoint_predictions.csv \
+  --val-predictions outputs/val_checkpoint_predictions.csv \
+  --output-dir outputs/train_learned_confusion_rules
+```
+
+The rule learner reads `pred_all_label_calibrated`, `pred_color_calibrated`, per-slot `char_conf_*`, and labels from exported diagnostics. It selects rules on the train prediction CSV, then reports the resulting accuracy on the validation prediction CSV without using validation labels to choose rules.
+
 `--eval-checkpoint` 会复用 checkpoint 中保存的输入尺寸、归一化、TTA 与解码先验；不加 `--skip-test` 时会在评估后继续生成 `outputs/submission.csv`。
 
 默认参数：

@@ -159,6 +159,7 @@ class TrainConfig:
     debug_samples: int = 128
     predict_only: bool = False
     eval_checkpoint: bool = False
+    eval_split: str = "val"
     skip_test: bool = False
     expected_test_rows: Optional[int] = 5000
 
@@ -235,6 +236,12 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--debug-samples", type=int, default=128)
     parser.add_argument("--predict-only", action="store_true")
     parser.add_argument("--eval-checkpoint", action="store_true")
+    parser.add_argument(
+        "--eval-split",
+        choices=["val", "train", "all_train", "debug_train"],
+        default="val",
+        help="Dataset split to evaluate when --eval-checkpoint is used.",
+    )
     parser.add_argument("--skip-test", action="store_true")
     parser.add_argument("--expected-test-rows", type=int, default=5000)
     args = parser.parse_args()
@@ -300,6 +307,7 @@ def parse_args() -> TrainConfig:
         debug_samples=args.debug_samples,
         predict_only=args.predict_only,
         eval_checkpoint=args.eval_checkpoint,
+        eval_split=args.eval_split,
         skip_test=args.skip_test,
         expected_test_rows=args.expected_test_rows,
     )
@@ -1920,12 +1928,21 @@ def evaluate_checkpoint_model(
     model = load_model_from_checkpoint(resolve_checkpoint_path(config), config)
     train_image_dir = config.data_dir / "train" / "images"
 
-    if config.debug_overfit:
+    eval_split = "debug_train" if config.debug_overfit else config.eval_split
+    if eval_split == "debug_train":
         val_split = train_df.sort_values("filename").head(config.debug_samples).reset_index(drop=True)
         eval_name = "debug_train"
-    else:
+    elif eval_split == "train":
+        val_split, _ = split_train_val(train_df, val_ratio=config.val_ratio, seed=config.seed)
+        eval_name = "train"
+    elif eval_split == "all_train":
+        val_split = train_df.reset_index(drop=True)
+        eval_name = "all_train"
+    elif eval_split == "val":
         _, val_split = split_train_val(train_df, val_ratio=config.val_ratio, seed=config.seed)
         eval_name = "val"
+    else:
+        raise ValueError(f"unknown eval split: {eval_split}")
 
     input_mean = normalization_for_storage(getattr(model, "input_mean", 0.5))
     input_std = normalization_for_storage(getattr(model, "input_std", 0.5))
