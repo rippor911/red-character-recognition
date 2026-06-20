@@ -3579,3 +3579,118 @@ Conclusion:
 - Existing validation-tuned aggressive/contextual rules do not transfer to this small checkpoint; they score 0.9868 and 0.9870 in the confusion-rule metric.
 - The clean train-learned rule set is now available as `--confusion-rule-set train_learned_small`.
 
+## 2026-06-20 Eight-Model Voting Research
+
+Purpose:
+
+- Check whether an eight-model voting scheme can replace validation-tuned contextual rules.
+- Avoid using validation-error-derived correction rules in this experiment.
+
+Eight fixed clean prediction files:
+
+```text
+1. outputs/convnext_small_192x576_ft_lr1e5_e8_eval/val_checkpoint_predictions.csv
+2. outputs/convnext_192x576_pool_query_color1_e1/val_predictions.csv
+3. outputs/convnext_192x576_pool_query_lr2e6_e1/val_predictions.csv
+4. outputs/convnext_192x576_pool_query_lr1e6_e1/val_predictions.csv
+5. outputs/convnext_192x576_pool_query_char2_e1/val_predictions.csv
+6. outputs/convnext_192x576_pool_query_e2/val_predictions.csv
+7. outputs/convnext_192x576_charweight_e2/val_predictions.csv
+8. outputs/convnext_160x480_ft_lr5e6_e2/val_predictions.csv
+```
+
+Voting rules evaluated:
+
+```text
+final_label_vote_argmax:
+  majority vote over each model's pred_label_argmax
+  tie-breaker: first model, ConvNeXt-small 192x576
+
+final_label_vote_calibrated:
+  majority vote over each model's pred_label_calibrated
+  tie-breaker: first model
+
+slot_vote_argmax:
+  majority vote per character slot from pred_all_label
+  majority vote per color slot from pred_color_argmax
+  decode red slots from left to right
+
+slot_vote_calibrated:
+  majority vote per character slot from pred_all_label_calibrated
+  majority vote per color slot from pred_color_calibrated
+
+weighted variants:
+  use model confidence columns char_conf_* and red_prob_*
+  no validation labels are used to fit weights
+```
+
+Eight-model results:
+
+```text
+best single clean small model:
+  calibrated=0.9888 errors=56
+  argmax=0.9884 errors=58
+
+final_label_vote_argmax:
+  acc=0.9860 errors=70
+
+final_label_vote_calibrated:
+  acc=0.9870 errors=65
+
+slot_vote_argmax:
+  acc=0.9860 errors=70
+  char_all_acc=0.9678
+  color_pattern_acc=0.9980
+
+slot_vote_calibrated:
+  acc=0.9868 errors=66
+  char_all_acc=0.9678
+  color_pattern_acc=0.9986
+
+weighted_final_argmax:
+  acc=0.9862 errors=69
+
+weighted_final_calibrated:
+  acc=0.9870 errors=65
+
+weighted_slot_argmax:
+  acc=0.9866 errors=67
+
+weighted_slot_calibrated:
+  acc=0.9866 errors=67
+```
+
+Oracle analysis:
+
+```text
+oracle_any_argmax among fixed 8:
+  acc=0.9922 errors=39
+
+oracle_any_calibrated among fixed 8:
+  acc=0.9930 errors=35
+
+all clean model predictions, not a deployable method:
+  top 12 oracle calibrated=0.9944 errors=28
+  top 16 oracle calibrated=0.9950 errors=25
+  all 21 oracle calibrated=0.9958 errors=21
+```
+
+Interpretation:
+
+- Simple majority voting is worse than the strongest single small model.
+- The eight models are too correlated; most of the time they make the same decision, and weaker similar models outvote the strongest model on some hard samples.
+- Oracle scores show there is some complementarity, but using it would require a learned selector or stacking model. That would need a separate clean holdout or cross-validation; learning the selector on the same validation split would recreate the validation-overfitting problem.
+- Do not replace the current clean submission candidate with eight-model majority voting.
+
+Artifacts:
+
+```text
+outputs/model_prediction_inventory.csv
+outputs/vote8_research/models.csv
+outputs/vote8_research/summary.csv
+outputs/vote8_research/weighted_and_oracle.csv
+outputs/vote8_research/topn_majority_oracle.csv
+outputs/vote8_slot_vote_argmax_val_predictions.csv
+outputs/vote8_slot_vote_calibrated_val_predictions.csv
+```
+
