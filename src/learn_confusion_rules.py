@@ -18,6 +18,18 @@ class Rule:
     pattern: str | None
 
 
+@dataclass
+class PredictionCache:
+    pred_chars: list[str]
+    patterns: list[str]
+    base_labels: list[str]
+    target_labels: list[str]
+    char_conf: list[list[float]]
+    red_probs: list[list[float]]
+    final_slots: list[list[int]]
+    source_slot_index: dict[tuple[str, int], list[int]]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Learn character confusion rules from prediction CSV files.")
     parser.add_argument("--train-predictions", type=Path, required=True)
@@ -62,8 +74,55 @@ def decode(chars: str, pattern: str, red_probs: Iterable[float]) -> str:
     return chars[best_slot]
 
 
+def get_final_slots(pattern: str, red_probs: Iterable[float]) -> list[int]:
+    slots = [idx for idx, color in enumerate(pattern) if color == "r"]
+    if slots:
+        return slots
+    probs = list(red_probs)
+    return [max(range(5), key=lambda idx: probs[idx])]
+
+
 def row_red_probs(row: pd.Series) -> list[float]:
     return [float(row[f"red_prob_{idx}"]) for idx in range(1, 6)]
+
+
+def build_cache(df: pd.DataFrame) -> PredictionCache:
+    pred_chars: list[str] = []
+    patterns: list[str] = []
+    base_labels: list[str] = []
+    target_labels: list[str] = []
+    char_conf: list[list[float]] = []
+    red_probs: list[list[float]] = []
+    final_slots: list[list[int]] = []
+    source_slot_index: dict[tuple[str, int], list[int]] = {}
+
+    for row_idx, row in enumerate(df.itertuples(index=False)):
+        row_dict = row._asdict()
+        chars = str(row_dict["pred_all_label_calibrated"])
+        pattern = str(row_dict["pred_color_calibrated"]).lower()
+        conf = [float(row_dict[f"char_conf_{idx}"]) for idx in range(1, 6)]
+        probs = [float(row_dict[f"red_prob_{idx}"]) for idx in range(1, 6)]
+        pred_chars.append(chars)
+        patterns.append(pattern)
+        base_labels.append(str(row_dict["pred_label_calibrated"]))
+        target_labels.append(str(row_dict["target_label"]))
+        char_conf.append(conf)
+        red_probs.append(probs)
+        final_slots.append(get_final_slots(pattern, probs))
+        if len(chars) == 5:
+            for slot, char in enumerate(chars):
+                source_slot_index.setdefault((char, slot), []).append(row_idx)
+
+    return PredictionCache(
+        pred_chars=pred_chars,
+        patterns=patterns,
+        base_labels=base_labels,
+        target_labels=target_labels,
+        char_conf=char_conf,
+        red_probs=red_probs,
+        final_slots=final_slots,
+        source_slot_index=source_slot_index,
+    )
 
 
 def apply_rules_to_chars(row: pd.Series, rules: list[Rule], char_col: str = "pred_all_label_calibrated") -> str:
@@ -174,16 +233,32 @@ def generate_candidates(
     return candidates
 
 
-def score_candidate(df: pd.DataFrame, candidate: Rule) -> dict[str, int | float]:
+def score_candidate(cache: PredictionCache, candidate: Rule) -> dict[str, int | float]:
     fixed = 0
     broken = 0
     changed = 0
-    for _, row in df.iterrows():
-        base_label = str(row["pred_label_calibrated"])
-        target = str(row["target_label"])
-        adjusted_chars = apply_single_rule_to_chars(row, candidate)
-        pattern = str(row["pred_color_calibrated"]).lower()
-        adjusted_label = decode(adjusted_chars, pattern, row_red_probs(row))
+    candidate_slots = [candidate.slot] if candidate.slot is not None else list(range(5))
+    row_indices: set[int] = set()
+    for slot in candidate_slots:
+        row_indices.update(cache.source_slot_index.get((candidate.source, slot), ()))
+
+    for row_idx in row_indices:
+        if candidate.pattern is not None and cache.patterns[row_idx] != candidate.pattern:
+            continue
+        chars = list(cache.pred_chars[row_idx])
+        touched_final_label = False
+        for slot in candidate_slots:
+            if chars[slot] != candidate.source:
+                continue
+            if cache.char_conf[row_idx][slot] > candidate.threshold:
+                continue
+            chars[slot] = candidate.target
+            touched_final_label = touched_final_label or slot in cache.final_slots[row_idx]
+        if not touched_final_label:
+            continue
+        adjusted_label = "".join(chars[slot] for slot in cache.final_slots[row_idx])
+        base_label = cache.base_labels[row_idx]
+        target = cache.target_labels[row_idx]
         if adjusted_label == base_label:
             continue
         changed += 1
@@ -203,9 +278,10 @@ def learn_rules(
     min_gain: int,
     max_rules: int,
 ) -> tuple[list[Rule], list[dict[str, object]]]:
+    train_cache = build_cache(train_df)
     scored: list[tuple[Rule, dict[str, int | float]]] = []
     for candidate in candidates:
-        score = score_candidate(train_df, candidate)
+        score = score_candidate(train_cache, candidate)
         if int(score["gain"]) >= min_gain:
             scored.append((candidate, score))
     scored.sort(

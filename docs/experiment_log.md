@@ -3409,3 +3409,173 @@ Important caveat:
 - The self-test uses the same validation CSV as both train and val only to verify the script mechanics.
 - The real experiment must first export train-split predictions from the best checkpoint with `--eval-checkpoint --eval-split train`, then learn rules from those train predictions and evaluate them on the fixed validation prediction CSV.
 
+## 2026-06-20 ConvNeXt-Small 192x576 Continuation
+
+Purpose:
+
+- Continue the previous ConvNeXt-small checkpoint at higher resolution.
+- Check whether the larger backbone can beat the ConvNeXt-tiny 192x576 pure-model score of 0.9874.
+
+Command:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs\convnext_small_192x576_ft_lr1e5_e8 \
+  --checkpoint-dir checkpoints\convnext_small_192x576_ft_lr1e5_e8 \
+  --init-checkpoint checkpoints\convnext_small_160x480_pool_query_e2\baseline_best.pt \
+  --model convnext_small \
+  --normalization imagenet \
+  --image-height 192 \
+  --image-width 576 \
+  --slot-extractor pool_query \
+  --learning-rate 1e-5 \
+  --epochs 8 \
+  --batch-size 4 \
+  --num-workers 2 \
+  --device cuda \
+  --no-scheduler
+```
+
+Observed epochs before early stop:
+
+```text
+epoch 1: calibrated_final_exact_acc=0.9828
+epoch 2: calibrated_final_exact_acc=0.9854
+epoch 3: calibrated_final_exact_acc=0.9860
+epoch 4: calibrated_final_exact_acc=0.9888  <-- best
+epoch 5: calibrated_final_exact_acc=0.9878
+epoch 6: calibrated_final_exact_acc=0.9876
+```
+
+Best checkpoint re-evaluation:
+
+```text
+path=checkpoints/convnext_small_192x576_ft_lr1e5_e8/baseline_best.pt
+output_dir=outputs/convnext_small_192x576_ft_lr1e5_e8_eval
+final_exact_acc=0.9884
+calibrated_final_exact_acc=0.9888
+char_slot_acc=0.99424
+color_slot_acc=0.99968
+color_pattern_acc=0.99840
+char_oracle_final_exact_acc=0.99880
+color_oracle_final_exact_acc=0.99000
+```
+
+Conclusion:
+
+- This is the new best pure-model validation score, improving over the previous pure ConvNeXt-tiny score from 0.9874 to 0.9888.
+- Later epochs showed validation regression, so the run was stopped after epoch 6 and the epoch-4 best checkpoint was kept.
+- The generated pure small submission is valid, but the canonical `outputs/submission.csv` remains the contextual high-validation candidate because it still has the highest validation score.
+
+Artifacts:
+
+```text
+checkpoints/convnext_small_192x576_ft_lr1e5_e8/baseline_best.pt
+outputs/convnext_small_192x576_ft_lr1e5_e8_eval/val_checkpoint_metrics.csv
+outputs/convnext_small_192x576_ft_lr1e5_e8_eval/val_checkpoint_predictions.csv
+outputs/convnext_small_192x576_ft_lr1e5_e8_eval/val_checkpoint_errors.csv
+outputs/convnext_small_192x576_ft_lr1e5_e8_eval/submission.csv
+logs/convnext_small_192x576_ft_lr1e5_e8.out.log
+logs/convnext_small_192x576_ft_lr1e5_e8_eval.out.log
+```
+
+## 2026-06-20 Train-Learned Rules On ConvNeXt-Small
+
+Purpose:
+
+- Learn character confusion rules from train-split predictions rather than validation errors.
+- Evaluate fixed learned rules on the validation split and generate a corresponding submission.
+
+Train prediction export:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs\convnext_small_192x576_ft_lr1e5_e8_train_eval \
+  --checkpoint-dir checkpoints\convnext_small_192x576_ft_lr1e5_e8 \
+  --checkpoint-path checkpoints\convnext_small_192x576_ft_lr1e5_e8\baseline_best.pt \
+  --eval-checkpoint \
+  --eval-split train \
+  --skip-test \
+  --device cuda \
+  --batch-size 4 \
+  --num-workers 2
+```
+
+Train split checkpoint metric:
+
+```text
+rows=45000
+final_exact_acc=0.9950
+calibrated_final_exact_acc=0.995244
+char_slot_acc=0.997733
+color_slot_acc=0.999809
+color_pattern_acc=0.999044
+```
+
+Rule learning command:
+
+```bash
+python src\learn_confusion_rules.py \
+  --train-predictions outputs\convnext_small_192x576_ft_lr1e5_e8_train_eval\train_checkpoint_predictions.csv \
+  --val-predictions outputs\convnext_small_192x576_ft_lr1e5_e8_eval\val_checkpoint_predictions.csv \
+  --output-dir outputs\convnext_small_train_learned_rules \
+  --min-gain 2 \
+  --max-rules 80
+```
+
+Learned rules:
+
+```text
+("0", "O", 0.757, None),
+("I", "1", 0.563, 2, "uuruu"),
+("5", "S", 0.742, 3),
+("1", "I", 0.684, 3, "rrrru"),
+("0", "O", 0.826, 2, "rurrr"),
+("U", "0", 0.914, 3),
+("G", "C", 0.559, None),
+```
+
+Rule learning result:
+
+```text
+train: base_acc=0.995244 rule_acc=0.995556 net_gain=14 fixed=16 broken=2
+val:   base_acc=0.988800 rule_acc=0.989000 net_gain=1  fixed=2  broken=1
+```
+
+Submission generation:
+
+```bash
+python -u src/main.py \
+  --data-dir "C:\Users\GJR79\xwechat_files\wxid_y2flsengm4t722_bc12\msg\file\2026-06\红色字符识别" \
+  --output-dir outputs\convnext_small_train_learned_rules_predict \
+  --checkpoint-dir checkpoints\convnext_small_192x576_ft_lr1e5_e8 \
+  --checkpoint-path checkpoints\convnext_small_192x576_ft_lr1e5_e8\baseline_best.pt \
+  --eval-checkpoint \
+  --device cuda \
+  --batch-size 4 \
+  --num-workers 2 \
+  --use-confusion-rules \
+  --confusion-rule-set train_learned_small \
+  --no-val-diagnostics
+```
+
+Submission validation:
+
+```text
+path=outputs/convnext_small_train_learned_rules_predict/submission.csv
+rows=5000
+unique_ids=5000
+bad_labels=0
+contains_label_NA=2
+changed_vs_small_pure=2
+changed_vs_current_canonical_contextual=58
+```
+
+Conclusion:
+
+- Train-learned rules provide a small but cleaner validation gain on the small model: 0.9888 -> 0.9890.
+- Existing validation-tuned aggressive/contextual rules do not transfer to this small checkpoint; they score 0.9868 and 0.9870 in the confusion-rule metric.
+- The clean train-learned rule set is now available as `--confusion-rule-set train_learned_small`.
+

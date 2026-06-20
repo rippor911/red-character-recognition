@@ -94,6 +94,15 @@ CONTEXTUAL_CONFUSION_RULES: tuple[ConfusionRule, ...] = AGGRESSIVE_CONFUSION_RUL
     ("O", "0", 0.945, 2, "rrrur"),
     ("T", "7", 0.713, 2, "rrrur"),
 )
+TRAIN_LEARNED_SMALL_CONFUSION_RULES: tuple[ConfusionRule, ...] = (
+    ("0", "O", 0.757, None),
+    ("I", "1", 0.563, 2, "uuruu"),
+    ("5", "S", 0.742, 3),
+    ("1", "I", 0.684, 3, "rrrru"),
+    ("0", "O", 0.826, 2, "rurrr"),
+    ("U", "0", 0.914, 3),
+    ("G", "C", 0.559, None),
+)
 
 
 @dataclass
@@ -217,7 +226,7 @@ def parse_args() -> TrainConfig:
     parser.add_argument("--use-confusion-rules", action="store_true")
     parser.add_argument(
         "--confusion-rule-set",
-        choices=["conservative", "aggressive", "contextual"],
+        choices=["conservative", "aggressive", "contextual", "train_learned_small"],
         default="conservative",
     )
     parser.add_argument("--no-count-prior", action="store_true")
@@ -1233,6 +1242,8 @@ def get_confusion_rules(rule_set: str) -> tuple[ConfusionRule, ...]:
         return AGGRESSIVE_CONFUSION_RULES
     if rule_set == "contextual":
         return CONTEXTUAL_CONFUSION_RULES
+    if rule_set == "train_learned_small":
+        return TRAIN_LEARNED_SMALL_CONFUSION_RULES
     raise ValueError(f"unknown confusion rule set: {rule_set}")
 
 

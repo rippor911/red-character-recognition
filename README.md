@@ -105,6 +105,12 @@ python src/learn_confusion_rules.py \
 
 The rule learner reads `pred_all_label_calibrated`, `pred_color_calibrated`, per-slot `char_conf_*`, and labels from exported diagnostics. It selects rules on the train prediction CSV, then reports the resulting accuracy on the validation prediction CSV without using validation labels to choose rules.
 
+Apply the train-learned small-model rule set:
+
+```bash
+python src/main.py --eval-checkpoint --checkpoint-path checkpoints/convnext_small_192x576_ft_lr1e5_e8/baseline_best.pt --use-confusion-rules --confusion-rule-set train_learned_small
+```
+
 `--eval-checkpoint` 会复用 checkpoint 中保存的输入尺寸、归一化、TTA 与解码先验；不加 `--skip-test` 时会在评估后继续生成 `outputs/submission.csv`。
 
 默认参数：
